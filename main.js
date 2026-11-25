@@ -30,14 +30,15 @@ const ZOOM_MAX = 2.6, ZOOM_STEP = 2.2;
 const PITCH = 1.3, CELL = 0.5;          // wall niche spacing and half-size
 const R = 1;                            // carousel niche half-size
 const TOY_H = 1.32;                     // tallest placeholder toy, in toy units
-const PARTICLES = 9000;
+const TOY_SCALE = 1.12;                 // figure size inside a room, relative to the cube's half-size
+const PARTICLES = 14000;
 
 /* ------------------------------ renderer ------------------------------ */
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;     // this type honours shadow.radius, for soft edges
 renderer.toneMapping = THREE.LinearToneMapping;   // keeps the wall a true white and the figure colours saturated
 renderer.toneMappingExposure = 1.0;
 renderer.localClippingEnabled = true;
@@ -70,19 +71,22 @@ const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
 const hemi = new THREE.HemisphereLight(0xffffff, 0xe9e6e1, 0.75);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 2.1);
-sun.position.set(-3.5, 8, 9);
+sun.position.set(-1.6, 4.6, 10);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.radius = 6;
+sun.shadow.radius = 9;
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
 Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 30 });
 scene.add(sun);
 
 const wallMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55 });
-const cubeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55, vertexColors: true, side: THREE.DoubleSide });
+const frameMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55 });
+const roomMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, envMapIntensity: 0.35, vertexColors: true, side: THREE.DoubleSide });
 const voidMat = new THREE.MeshStandardMaterial({ color: 0x6f6c68, roughness: 1, envMapIntensity: 0.05 });
-const plinthMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, envMapIntensity: 0.6 });
+const plinthMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, envMapIntensity: 0.6 });
+const ventMat = new THREE.MeshBasicMaterial({ color: 0x2b2a28 });
+const maskMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
 
 /* ---------------------------- geometry ---------------------------- */
 function wallMesh(holes) {
@@ -106,39 +110,88 @@ function backdrop(z) {
   return m;
 }
 
-/**
- * Unit cube (half-size 1) with a tapered alcove sunk into each of its six
- * faces. Because all faces match, any quarter turn looks the same as rest,
- * so the cube can keep turning forever while the figures are swapped.
+/*
+ * The turning cube (half-size 1). Each face has a rounded opening into a
+ * straight-walled room with soft corners. Rooms on neighbouring faces would
+ * collide inside a real cube, so every opening is a stencil "window": a room
+ * is only drawn through its own opening and never shows through another.
  */
-const ALC = { rim: 0.92, back: 0.36, depth: 0.55 };
-const cubeGeometry = (() => {
-  const pos = [], col = [];
-  const sq = (h, z) => [[-h, -h, z], [h, -h, z], [h, h, z], [-h, h, z]];
-  const face = [];           // [vertex, shade] triangles for the +z face
-  const quad = (a, b, c, d, sa, sb) => face.push([a, sa], [b, sa], [c, sb], [a, sa], [c, sb], [d, sb]);
-  const outer = sq(1, 1), rim = sq(ALC.rim, 1), back = sq(ALC.back, 1 - ALC.depth);
-  for (let i = 0; i < 4; i++) {
-    const j = (i + 1) % 4;
-    quad(outer[i], outer[j], rim[j], rim[i], 1, 1);
-    quad(rim[i], rim[j], back[j], back[i], 0.74, 0.3);     // darker towards the back: cheap ambient occlusion
+const ROOM = { half: 0.86, depth: 1.15, corner: 0.16, lip: 0.05, cove: 0.16, toyZ: 0.42 };
+
+/** Rounded square outline at depth z, counter-clockwise, same point count for any size. */
+function roundedRing(half, radius, z) {
+  const pts = [], c = half - radius;
+  [[c, c, 0], [-c, c, 1], [-c, -c, 2], [c, -c, 3]].forEach(([cx, cy, q]) => {
+    for (let i = 0; i <= 8; i++) {
+      const a = (q + i / 8) * Math.PI / 2;
+      pts.push(new THREE.Vector3(cx + radius * Math.cos(a), cy + radius * Math.sin(a), z));
+    }
+  });
+  return pts;
+}
+
+const roomRings = (() => {
+  const { half, depth, corner, lip, cove } = ROOM, rings = [];
+  for (let i = 0; i <= 5; i++) {                       // soft lip where the room meets the wall face
+    const t = (i / 5) * Math.PI / 2, grow = lip * (1 - Math.sin(t));
+    rings.push({ pts: roundedRing(half + grow, corner + grow, 1 - lip * (1 - Math.cos(t))), shade: 1 - 0.1 * i / 5 });
   }
-  quad(back[0], back[1], back[2], back[3], 0.3, 0.3);
-  const turns = [[0, 0], [0, 1], [0, 2], [0, 3], [1, 0], [-1, 0]].map(([x, y]) =>
-    new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(x * Math.PI / 2, y * Math.PI / 2, 0)));
-  const v = new THREE.Vector3();
-  for (const m of turns) for (const [p, s] of face) {
-    v.set(p[0], p[1], p[2]).applyMatrix4(m);
-    pos.push(v.x, v.y, v.z);
-    col.push(s, s, s);
+  for (let i = 0; i <= 6; i++) {                       // straight walls, then a cove into the back wall
+    const t = (i / 6) * Math.PI / 2, shrink = cove * (1 - Math.cos(t));
+    rings.push({ pts: roundedRing(half - shrink, Math.max(corner - shrink, 0.03), 1 - (depth - cove) - cove * Math.sin(t)), shade: 0.9 - 0.14 * i / 6 });
   }
+  return rings;
+})();
+
+const roomGeometry = (() => {
+  const pos = [], col = [], idx = [], n = roomRings[0].pts.length;
+  roomRings.forEach((ring) => ring.pts.forEach((p) => { pos.push(p.x, p.y, p.z); col.push(ring.shade, ring.shade, ring.shade); }));
+  for (let r = 0; r < roomRings.length - 1; r++) for (let i = 0; i < n; i++) {
+    const a = r * n + i, b = r * n + (i + 1) % n, c = a + n, d = b + n;
+    idx.push(a, b, c, c, b, d);
+  }
+  const last = roomRings[roomRings.length - 1], base = pos.length / 3;   // back wall
+  last.pts.forEach((p) => { pos.push(p.x, p.y, p.z); col.push(last.shade, last.shade, last.shade); });
+  for (let i = 1; i < n - 1; i++) idx.push(base, base + i, base + i + 1);
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
   g.computeVertexNormals();
   return g;
 })();
-const plinthGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.05, 48);
+
+const maskGeometry = (() => {
+  const pts = roomRings[0].pts, pos = [], idx = [];
+  pts.forEach((p) => pos.push(p.x, p.y, p.z));
+  for (let i = 1; i < pts.length - 1; i++) idx.push(0, i, i + 1);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return g;
+})();
+
+/** The six outer faces of the cube, each with its opening cut out. */
+const frameGeometry = (() => {
+  const shape = new THREE.Shape();
+  shape.moveTo(-1, -1); shape.lineTo(1, -1); shape.lineTo(1, 1); shape.lineTo(-1, 1); shape.closePath();
+  shape.holes = [new THREE.Path(roomRings[0].pts.map((p) => new THREE.Vector2(p.x, p.y)))];
+  const face = new THREE.ShapeGeometry(shape).toNonIndexed();
+  face.translate(0, 0, 1);
+  const pos = [];
+  [[0, 0], [0, 1], [0, 2], [0, 3], [1, 0], [-1, 0]].forEach(([x, y]) => {
+    const g = face.clone().applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(x * Math.PI / 2, y * Math.PI / 2, 0)));
+    pos.push(...g.attributes.position.array);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+})();
+
+const plinthGeometry = new THREE.CylinderGeometry(0.33, 0.33, 0.05, 56);
+const ventGeometry = new THREE.CircleGeometry(0.24, 40);
+const gapGeometry = new THREE.RingGeometry(0.37, 0.46, 56);
 
 /* ------------------------------- toys ------------------------------- */
 const G = {
@@ -214,44 +267,72 @@ function makeToy(art, skin = (m) => m) {
  * facing out; holder 1 is the one arriving on a side face (or, in particle
  * mode, the one forming in the same spot). Sizes are relative to `half`.
  */
+let nextStencil = 0;
+function stencilled(material, ref) {
+  const m = material.clone();
+  m.stencilWrite = true;
+  m.stencilFunc = THREE.EqualStencilFunc;
+  m.stencilRef = ref;
+  return m;
+}
+
 function makeShelf(half, withParticles) {
   const group = new THREE.Group();          // sits in the wall, never turns
   const cube = new THREE.Group();           // turns
-  cube.scale.setScalar(half * 0.998);
-  cube.position.z = -half;
-  const shell = new THREE.Mesh(cubeGeometry, cubeMat);
-  shell.castShadow = true;
-  shell.receiveShadow = true;
-  cube.add(shell);
+  cube.scale.setScalar(half * 1.003);       // a hair larger than the opening and just behind it, so no seam shows
+  cube.position.z = -half * 1.007;
+  const frame = new THREE.Mesh(frameGeometry, frameMat);
+  frame.castShadow = true;
+  cube.add(frame);
   group.add(cube);
 
+  const floorY = -ROOM.half, slotY = floorY + 0.05;
   const holders = [0, 1].map(() => {
+    const ref = (nextStencil++ % 250) + 1;
     const g = new THREE.Group();
-    const plinth = new THREE.Mesh(plinthGeometry, plinthMat);
-    plinth.position.set(0, -0.645, 0.7);
+    const inside = (mesh) => { mesh.renderOrder = 2; g.add(mesh); return mesh; };
+
+    const mask = new THREE.Mesh(maskGeometry, maskMat.clone());
+    Object.assign(mask.material, { stencilWrite: true, stencilRef: ref, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp });
+    mask.renderOrder = 1;
+    g.add(mask);
+
+    inside(new THREE.Mesh(roomGeometry, stencilled(roomMat, ref))).receiveShadow = true;
+    const plinth = inside(new THREE.Mesh(plinthGeometry, stencilled(plinthMat, ref)));
+    plinth.position.set(0, floorY + 0.025, ROOM.toyZ);
     plinth.castShadow = true;
     plinth.receiveShadow = true;
+
     const slot = new THREE.Group();
-    slot.position.set(0, -0.62, 0.7);
-    slot.scale.setScalar(0.95);
-    g.add(plinth, slot);
+    slot.position.set(0, slotY, ROOM.toyZ);
+    slot.scale.setScalar(TOY_SCALE);
+    g.add(slot);
     cube.add(g);
-    const h = { group: g, slot, art: -1, toy: null };
+
+    const h = { group: g, slot, plinth, ref, art: -1, toy: null, skins: new Map() };
+    h.plane = withParticles ? new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6) : null;
+    h.skin = (m) => {
+      if (!h.skins.has(m)) {
+        const c = stencilled(m, h.ref);
+        if (h.plane) { c.clippingPlanes = [h.plane]; c.clipShadows = true; }
+        h.skins.set(m, c);
+      }
+      return h.skins.get(m);
+    };
     if (withParticles) {
-      h.plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6);
-      h.skins = new Map();
-      h.skin = (m) => {
-        if (!h.skins.has(m)) {
-          const c = m.clone();
-          c.clippingPlanes = [h.plane];
-          c.clipShadows = true;
-          h.skins.set(m, c);
-        }
-        return h.skins.get(m);
-      };
-      h.points = new THREE.Points(new THREE.BufferGeometry(), particleMaterial.clone());
+      // Openings the dust travels through: a vent in the ceiling and a gap around the plinth.
+      const vent = inside(new THREE.Mesh(ventGeometry, stencilled(ventMat, ref)));
+      vent.position.set(0, ROOM.half - 0.003, ROOM.toyZ);
+      vent.rotation.x = Math.PI / 2;
+      const gap = inside(new THREE.Mesh(gapGeometry, stencilled(ventMat, ref)));
+      gap.position.set(0, floorY + 0.003, ROOM.toyZ);
+      gap.rotation.x = -Math.PI / 2;
+      h.points = new THREE.Points(new THREE.BufferGeometry(), stencilled(particleMaterial, ref));
+      h.points.material.uniforms.uTop.value = (ROOM.half - slotY) / TOY_SCALE;
+      h.points.material.uniforms.uBottom.value = (floorY - slotY) / TOY_SCALE;
       h.points.frustumCulled = false;
       h.points.visible = false;
+      h.points.renderOrder = 2;
       slot.add(h.points);
     }
     return h;
@@ -259,11 +340,20 @@ function makeShelf(half, withParticles) {
   return { group, cube, holders, half };
 }
 
+/** Draw a holder's figure through another holder's opening (used when two figures share one room). */
+function showThrough(holder, ref) {
+  if (holder.ref === ref) return;
+  holder.ref = ref;
+  holder.skins.forEach((m) => { m.stencilRef = ref; });
+  if (holder.points) holder.points.material.stencilRef = ref;
+}
+
 function setArt(holder, index) {
   if (holder.art === index) return;
   holder.art = index;
   if (holder.toy) holder.slot.remove(holder.toy);
   holder.toy = makeToy(ARTWORKS[index], holder.skin);
+  holder.toy.traverse((o) => { o.renderOrder = 2; });
   holder.slot.add(holder.toy);
   if (holder.points) holder.points.geometry = particleGeometry(index);
 }
@@ -280,37 +370,44 @@ function turnCube(shelf, axis, frac) {
 
 /* ------------------------------ particles ------------------------------ */
 const particleMaterial = new THREE.ShaderMaterial({
-  uniforms: { uD: { value: 0 }, uDir: { value: 1 }, uSize: { value: 30 } },
+  uniforms: { uD: { value: 0 }, uSide: { value: 1 }, uSize: { value: 30 }, uTop: { value: 1.5 }, uBottom: { value: 0 } },
   transparent: true,
   depthWrite: false,
   vertexShader: /* glsl */`
     attribute vec3 color; attribute vec3 aSeed; attribute float aH;
-    uniform float uD, uDir, uSize;
+    uniform float uD, uSide, uSize, uTop, uBottom;
     varying vec3 vColor; varying float vAlpha;
     void main() {
-      // The figure comes apart from the top down: each grain leaves when the sweep reaches its height.
-      float start = (1.0 - aH) * 0.5;
-      float e = clamp((uD - start) / 0.5, 0.0, 1.0);
+      // Grains leave from the head down: each one sets off when the sweep reaches its height.
+      float start = (1.0 - aH) * 0.45;
+      float e = clamp((uD - start) / 0.55, 0.0, 1.0);
       float k = e * e * (3.0 - 2.0 * e);
-      float ang = aSeed.x * 6.2832 + k * 6.0 * (aSeed.y - 0.5);
-      vec3 p = position;
-      p.x += sin(ang) * 0.3 * k * aSeed.z;
-      p.z += (cos(ang) * 0.12 - 0.3) * k * aSeed.z;   // drift back, so the dust stays inside the niche
-      p.y += uDir * k * (0.7 + aSeed.y * 1.1);
+      float a = aSeed.x * 6.2832;
+      // Leaving grains funnel into the ceiling vent; arriving grains start in the gap around the plinth.
+      vec3 goal = uSide > 0.0
+        ? vec3(cos(a) * 0.17 * sqrt(aSeed.z), uTop + 0.12, sin(a) * 0.17 * sqrt(aSeed.z))
+        : vec3(cos(a) * (0.335 + 0.05 * aSeed.z), uBottom - 0.1, sin(a) * (0.335 + 0.05 * aSeed.z));
+      float ky = pow(k, mix(0.75, 1.35, aSeed.y));
+      float kxz = uSide > 0.0 ? k * k : pow(k, 0.7);
+      vec3 p = vec3(mix(position.xz, goal.xz, kxz), mix(position.y, goal.y, ky)).xzy;
+      float sway = sin(3.14159 * k);
+      p.x += sin(k * 9.0 + aSeed.x * 40.0) * 0.07 * sway;
+      p.z += cos(k * 7.0 + aSeed.y * 40.0) * 0.05 * sway;
       vec3 n = normalize(normalMatrix * normal);
-      float light = 0.5 + 0.75 * max(dot(n, normalize(vec3(-0.25, 0.9, 0.45))), 0.0);
+      float light = 0.6 + 0.8 * max(dot(n, normalize(vec3(-0.25, 0.9, 0.45))), 0.0);
       vColor = color * light;
-      vAlpha = step(0.0005, e) * (1.0 - smoothstep(0.7, 1.0, e));
+      vAlpha = step(0.0005, e) * (1.0 - smoothstep(0.9, 1.0, k));
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
-      gl_PointSize = uSize * (1.0 - 0.55 * k) / -mv.z;
+      gl_PointSize = uSize * mix(1.0, 0.5, k) * (0.7 + 0.6 * aSeed.y) / -mv.z;
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: /* glsl */`
     varying vec3 vColor; varying float vAlpha;
     void main() {
       vec2 c = gl_PointCoord - 0.5;
-      if (dot(c, c) > 0.25 || vAlpha < 0.01) discard;
-      gl_FragColor = vec4(vColor, vAlpha);
+      float r = dot(c, c);
+      if (r > 0.25 || vAlpha < 0.01) discard;
+      gl_FragColor = vec4(vColor * (1.0 - r * 1.2), vAlpha);
       #include <tonemapping_fragment>
       #include <colorspace_fragment>
     }`,
@@ -378,13 +475,13 @@ let wallOffset = 0;                 // which artwork sits in the first niche
 let flip = null;                    // running "all cubes turn" transition
 
 function displayLight(half, shadows) {
-  const light = new THREE.SpotLight(0xfff1dc, 1, half * 2.5, 0.5, 0.9, 1.2);
-  light.position.set(0, half * 0.95, -half * 0.1);
-  light.target.position.set(0, -half * 0.25, -half * 0.42);
+  const light = new THREE.SpotLight(0xfff1dc, 1, half * 2.7, 0.72, 1, 1.2);
+  light.position.set(0, half * 0.74, -half * 0.14);
+  light.target.position.set(0, -half * 0.35, -half * 0.62);
   if (shadows) {
     light.castShadow = true;
     light.shadow.mapSize.set(1024, 1024);
-    light.shadow.radius = 4;
+    light.shadow.radius = 7;
     light.shadow.bias = -0.0006;
     light.shadow.normalBias = 0.02;
     light.shadow.camera.near = 0.05;
@@ -411,7 +508,7 @@ function buildWall(cols, rows) {
     turnCube(shelf, 'y', 0);
     const lamp = displayLight(CELL, false);
     lamp.position.set(cx, cy, 0);
-    lamp.userData.light.intensity = 3.4;
+    lamp.userData.light.intensity = 1.7;
     wallView.add(shelf.group, lamp);
     niches.push({ cx, cy, col, row, shelf });
   }
@@ -435,9 +532,10 @@ function startFlip(axis, dir) {
   const step = axis === 'y' ? 1 : grid.cols;
   flip = { axis, dir, step, time: 0 };
   niches.forEach((n, i) => {
-    const along = axis === 'y' ? n.col : n.row, across = axis === 'y' ? n.row : n.col;
-    const span = (axis === 'y' ? grid.cols : grid.rows) - 1;
-    n.delay = (dir > 0 ? span - along : along) * 0.09 + across * 0.035;
+    // The wave starts in one corner, on the side the wall was pushed towards, and spreads diagonally.
+    const fromCol = axis === 'y' && dir > 0 ? grid.cols - 1 : 0;
+    const fromRow = axis === 'x' && dir > 0 ? grid.rows - 1 : 0;
+    n.delay = Math.hypot(n.col - fromCol, n.row - fromRow) * 0.17;
     setArt(n.shelf.holders[1], mod(i + wallOffset + dir * step, N));
   });
 }
@@ -446,7 +544,7 @@ function stepFlip(dt) {
   flip.time += dt;
   let done = true;
   for (const n of niches) {
-    const p = clamp((flip.time - n.delay) / 0.8, 0, 1);
+    const p = clamp((flip.time - n.delay) / 0.85, 0, 1);
     if (p < 1) done = false;
     const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
     turnCube(n.shelf, flip.axis, flip.dir * e * 0.9999);
@@ -468,8 +566,9 @@ function stepFlip(dt) {
 const carouselView = new THREE.Group();
 scene.add(carouselView);
 const hero = makeShelf(R, true);
+hero.sideRef = hero.holders[1].ref;
 const heroLamp = displayLight(R, true);
-heroLamp.userData.light.intensity = 7.5;
+heroLamp.userData.light.intensity = 3.6;
 carouselView.add(hero.group, heroLamp, wallMesh([[0, 0, R]]), backdrop(-R * 2.6));
 
 const car = {
@@ -489,15 +588,15 @@ function settleCarousel() {
   car.target -= n;
 }
 
-function dissolve(holder, d, dir) {
+function dissolve(holder, d, side) {
   // d: 0 = solid figure, 1 = fully turned to dust. A cut plane sweeps down the solid as the grains leave.
-  const worldScale = R * 0.998 * 0.95;
   const baseY = holder.slot.getWorldPosition(new THREE.Vector3()).y;
-  holder.plane.constant = d <= 0 ? 1e6 : baseY + (1 - 2 * d) * TOY_H * worldScale;
+  holder.plane.constant = d <= 0 ? 1e6 : baseY + (1 - d / 0.45) * TOY_H * TOY_SCALE * R;
   holder.points.visible = d > 0 && d < 1;
-  holder.points.material.uniforms.uD.value = d;
-  holder.points.material.uniforms.uDir.value = dir;
-  holder.points.material.uniforms.uSize.value = 0.016 * renderer.domElement.height / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const u = holder.points.material.uniforms;
+  u.uD.value = d;
+  u.uSide.value = side;
+  u.uSize.value = 0.013 * renderer.domElement.height / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
 }
 
 function poseCarousel() {
@@ -505,24 +604,27 @@ function poseCarousel() {
   let current;
   if (car.mode === 'cube') {
     const n = Math.round(car.t), frac = car.t - n;
+    if (b.slot.parent !== b.group) b.group.add(b.slot);
+    showThrough(b, hero.sideRef);
     setArt(a, carArt(n));
     setArt(b, carArt(n + (frac >= 0 ? 1 : -1)));
     turnCube(hero, car.axis, frac);
     dissolve(a, 0, 1); dissolve(b, 0, 1);
     current = carArt(n);
   } else {
+    // Both figures share the front room: the first leaves through the ceiling,
+    // then, after a beat, the next gathers from the gap in the floor.
     const f = Math.floor(car.t + 1e-6), u = clamp(car.t - f, 0, 1);
+    if (b.slot.parent !== a.group) a.group.add(b.slot);
+    showThrough(b, a.ref);
     setArt(a, carArt(f));
     setArt(b, carArt(f + 1));
     turnCube(hero, car.axis, 0);
-    b.group.rotation.set(0, 0, 0);
-    b.group.visible = u > 0;
-    b.group.children[0].visible = false;           // one plinth is enough when both stand in the same spot
-    dissolve(a, u, 1);                             // leaving figure rises as dust
-    dissolve(b, 1 - u, -1);                        // next figure gathers from below
+    b.group.visible = false;
+    dissolve(a, clamp(u / 0.5, 0, 1), 1);
+    dissolve(b, 1 - clamp((u - 0.58) / 0.42, 0, 1), -1);
     current = carArt(Math.round(car.t));
   }
-  if (car.mode === 'cube') b.group.children[0].visible = true;
   if (current !== plateIndex) {
     plateIndex = current;
     plateName.textContent = ARTWORKS[current].name;
@@ -547,6 +649,7 @@ function refreshUI() {
   const wall = view === 'wall';
   wallView.visible = wall;
   carouselView.visible = !wall;
+  if (!wall) hint.style.opacity = 1;
   plate.hidden = wall;
   btnWall.setAttribute('aria-pressed', String(wall));
   btnCarousel.setAttribute('aria-pressed', String(!wall));
@@ -577,6 +680,7 @@ btnCarousel.addEventListener('click', () => setView('carousel'));
 btnOption.addEventListener('click', () => {
   if (view === 'wall') {
     cam.zoomT = cam.zoomT > 1.05 ? 1 : ZOOM_STEP;
+    hint.style.opacity = cam.zoomT > 1.05 ? 0 : 1;
   } else {
     settleCarousel();
     car.t = car.target = 0;
@@ -634,6 +738,7 @@ function zoomAt(next, clientX, clientY) {
   cam.y += ny * cam.halfH * (1 / cam.zoom - 1 / next);
   cam.zoom = cam.zoomT = next;
   btnOption.innerHTML = next > 1.05 ? '<b>Zoom</b> Out' : '<b>Zoom</b> In';
+  hint.style.opacity = next > 1.05 ? 0 : 1;
 }
 
 /* ------------------------------ pointer ------------------------------ */
@@ -790,7 +895,8 @@ function update(dt) {
     poseWall(tilt.x, tilt.y);
   } else {
     if (!pointers.size) {
-      car.t += (car.target - car.t) * (1 - Math.exp(-dt * 8));
+      if (car.mode === 'cube') car.t += (car.target - car.t) * (1 - Math.exp(-dt * 8));
+      else car.t += clamp(car.target - car.t, -dt * 0.55, dt * 0.55);     // steady pace, so the dust has time to travel
       if (Math.abs(car.target - car.t) < 0.0015) car.t = car.target;
     }
     poseCarousel();
