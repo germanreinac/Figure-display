@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Figure Display</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Unbounded:wght@500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!--page-->
+<div id="stage"><canvas id="scene" aria-label="3D shelf with art toys"></canvas></div>
+
+<div class="hud hud-top">
+  <h1>Figure Display</h1>
+  <p id="hint"></p>
+</div>
+
+<div class="hud hud-bottom">
+  <div id="plate" hidden>
+    <div id="plate-name"></div>
+    <div id="plate-meta"></div>
+  </div>
+  <div class="controls">
+    <div class="seg" role="group" aria-label="View">
+      <button id="view-wall" type="button" aria-pressed="true">Wall</button>
+      <button id="view-carousel" type="button" aria-pressed="false">Carousel</button>
+    </div>
+    <button id="option" class="chip" type="button"></button>
+  </div>
+</div>
+
+<script type="module" src="main.js"></script>
+<!--/page-->
+</body>
+</html>
