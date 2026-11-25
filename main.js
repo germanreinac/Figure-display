@@ -24,8 +24,8 @@ const clamp = THREE.MathUtils.clamp;
 
 /* Tunables */
 const MAX_TILT = 0.32;        // wall view: max sideways tilt in radians (~18°); up/down uses 70% of it
-const PARALLAX = 2.0;         // wall view: how much further the niche interiors swing than the wall
-const FLIP_AT = 0.93;         // wall view: fraction of max tilt that makes every cube turn
+const PARALLAX = 1.1;         // wall view: how much further the niche interiors swing than the wall
+const FLIP_AT = 0.9;          // wall view: fraction of max tilt that makes every cube turn
 const ZOOM_MAX = 2.6, ZOOM_STEP = 2.2;
 const PITCH = 1.3, CELL = 0.5;          // wall niche spacing and half-size
 const R = 1;                            // carousel niche half-size
@@ -45,7 +45,7 @@ renderer.localClippingEnabled = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xffffff);
-const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
+const camera = new THREE.PerspectiveCamera(26, 1, 1, 100);
 
 /* Studio environment for reflections: a grey room with a few soft boxes. */
 {
@@ -68,10 +68,11 @@ const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
   pmrem.dispose();
 }
 
-const hemi = new THREE.HemisphereLight(0xffffff, 0xe9e6e1, 0.75);
+const hemi = new THREE.HemisphereLight(0xffffff, 0xdcd8d2, 0.3);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffffff, 2.1);
-sun.position.set(-1.6, 4.6, 10);
+// Raking daylight from above: bright on the wall face, mostly blocked inside the niches.
+const sun = new THREE.DirectionalLight(0xffffff, 3.05);
+sun.position.set(-4.5, 8.5, 7);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.radius = 9;
@@ -80,12 +81,52 @@ sun.shadow.normalBias = 0.02;
 Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 30 });
 scene.add(sun);
 
-const wallMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55 });
-const frameMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55 });
-const roomMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, envMapIntensity: 0.35, vertexColors: true, side: THREE.DoubleSide });
-const voidMat = new THREE.MeshStandardMaterial({ color: 0x6f6c68, roughness: 1, envMapIntensity: 0.05 });
-const plinthMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, envMapIntensity: 0.6 });
+/** Limewash relief: soft uneven plaster with faint horizontal brush marks (tileable). */
+const limewash = (() => {
+  const size = 256, c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d'), img = ctx.createImageData(size, size);
+  const hash = (x, y, s) => { const n = Math.sin(x * 127.1 + y * 311.7 + s * 74.7) * 43758.5453; return n - Math.floor(n); };
+  const noise = (x, y, period, s) => {
+    const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+    const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+    const h = (i, j) => hash(((x0 + i) % period + period) % period, ((y0 + j) % period + period) % period, s);
+    return (h(0, 0) * (1 - u) + h(1, 0) * u) * (1 - v) + (h(0, 1) * (1 - u) + h(1, 1) * u) * v;
+  };
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = x / size, v = y / size;
+    const h = 0.5 * noise(u * 4, v * 4, 4, 1) + 0.25 * noise(u * 8, v * 16, 8, 2) + 0.17 * noise(u * 16, v * 48, 16, 3) + 0.08 * noise(u * 64, v * 64, 64, 4);
+    const g = Math.round(h * 255), i = (y * size + x) * 4;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = g;
+    img.data[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(0.5, 0.5);
+  return t;
+})();
+
+/** Soft round contact shadow for niches whose lamp casts no real shadow. */
+const blobTexture = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d'), g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(0,0,0,0.6)'); g.addColorStop(0.45, 'rgba(0,0,0,0.32)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+})();
+
+const plaster = { color: 0xffffff, roughness: 1, bumpMap: limewash, bumpScale: 1.5 };
+const wallMat = new THREE.MeshStandardMaterial({ ...plaster, envMapIntensity: 0.3 });
+const frameMat = wallMat;
+const roomMat = new THREE.MeshStandardMaterial({ ...plaster, bumpScale: 0.5, envMapIntensity: 0.16, vertexColors: true, side: THREE.DoubleSide });
+const voidMat = new THREE.MeshStandardMaterial({ color: 0xcfcbc4, roughness: 1, envMapIntensity: 0.2 });
+const plinthMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, envMapIntensity: 0.4 });
 const ventMat = new THREE.MeshBasicMaterial({ color: 0x2b2a28 });
+const ledMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const blobMat = new THREE.MeshBasicMaterial({ map: blobTexture, transparent: true, depthWrite: false });
 const maskMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
 
 /* ---------------------------- geometry ---------------------------- */
@@ -106,7 +147,6 @@ function wallMesh(holes) {
 function backdrop(z) {
   const m = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), voidMat);
   m.position.z = z;
-  m.receiveShadow = true;
   return m;
 }
 
@@ -144,18 +184,19 @@ const roomRings = (() => {
 })();
 
 const roomGeometry = (() => {
-  const pos = [], col = [], idx = [], n = roomRings[0].pts.length;
-  roomRings.forEach((ring) => ring.pts.forEach((p) => { pos.push(p.x, p.y, p.z); col.push(ring.shade, ring.shade, ring.shade); }));
+  const pos = [], col = [], uv = [], idx = [], n = roomRings[0].pts.length;
+  roomRings.forEach((ring) => ring.pts.forEach((p, i) => { pos.push(p.x, p.y, p.z); col.push(ring.shade, ring.shade, ring.shade); uv.push(i / n * 6, p.z); }));
   for (let r = 0; r < roomRings.length - 1; r++) for (let i = 0; i < n; i++) {
     const a = r * n + i, b = r * n + (i + 1) % n, c = a + n, d = b + n;
     idx.push(a, b, c, c, b, d);
   }
   const last = roomRings[roomRings.length - 1], base = pos.length / 3;   // back wall
-  last.pts.forEach((p) => { pos.push(p.x, p.y, p.z); col.push(last.shade, last.shade, last.shade); });
+  last.pts.forEach((p) => { pos.push(p.x, p.y, p.z); col.push(last.shade, last.shade, last.shade); uv.push(p.x, p.y); });
   for (let i = 1; i < n - 1; i++) idx.push(base, base + i, base + i + 1);
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.setIndex(idx);
   g.computeVertexNormals();
   return g;
@@ -178,19 +219,23 @@ const frameGeometry = (() => {
   shape.holes = [new THREE.Path(roomRings[0].pts.map((p) => new THREE.Vector2(p.x, p.y)))];
   const face = new THREE.ShapeGeometry(shape).toNonIndexed();
   face.translate(0, 0, 1);
-  const pos = [];
+  const pos = [], uv = [];
   [[0, 0], [0, 1], [0, 2], [0, 3], [1, 0], [-1, 0]].forEach(([x, y]) => {
     const g = face.clone().applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(x * Math.PI / 2, y * Math.PI / 2, 0)));
     pos.push(...g.attributes.position.array);
+    uv.push(...face.attributes.uv.array);
   });
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.computeVertexNormals();
   return g;
 })();
 
 const plinthGeometry = new THREE.CylinderGeometry(0.33, 0.33, 0.05, 56);
-const ventGeometry = new THREE.CircleGeometry(0.24, 40);
+const ventGeometry = new THREE.CircleGeometry(0.2, 40);
+const ledGeometry = new THREE.RingGeometry(0.2, 0.27, 56);
+const blobGeometry = new THREE.PlaneGeometry(1, 1);
 const gapGeometry = new THREE.RingGeometry(0.37, 0.46, 56);
 
 /* ------------------------------- toys ------------------------------- */
@@ -279,8 +324,8 @@ function stencilled(material, ref) {
 function makeShelf(half, withParticles) {
   const group = new THREE.Group();          // sits in the wall, never turns
   const cube = new THREE.Group();           // turns
-  cube.scale.setScalar(half * 1.003);       // a hair larger than the opening and just behind it, so no seam shows
-  cube.position.z = -half * 1.007;
+  cube.scale.setScalar(half * 1.0015);       // a hair larger than the opening and just behind it, so no seam shows
+  cube.position.z = -half * 1.0035;
   const frame = new THREE.Mesh(frameGeometry, frameMat);
   frame.castShadow = true;
   cube.add(frame);
@@ -319,14 +364,28 @@ function makeShelf(half, withParticles) {
       }
       return h.skins.get(m);
     };
+    // Ring of LEDs in the ceiling, straight above the figure.
+    const led = inside(new THREE.Mesh(ledGeometry, stencilled(ledMat, ref)));
+    led.position.set(0, ROOM.half - 0.004, ROOM.toyZ);
+    led.rotation.x = Math.PI / 2;
+    if (!withParticles) {
+      [[1.25, floorY + 0.004], [0.62, slotY + 0.003]].forEach(([size, y]) => {
+        const blob = inside(new THREE.Mesh(blobGeometry, stencilled(blobMat, ref)));
+        blob.position.set(0, y, ROOM.toyZ);
+        blob.rotation.x = -Math.PI / 2;
+        blob.scale.setScalar(size);
+      });
+    }
     if (withParticles) {
-      // Openings the dust travels through: a vent in the ceiling and a gap around the plinth.
+      // Openings the dust travels through, shown only in particle mode:
+      // a vent inside the LED ring and a gap around the plinth.
       const vent = inside(new THREE.Mesh(ventGeometry, stencilled(ventMat, ref)));
       vent.position.set(0, ROOM.half - 0.003, ROOM.toyZ);
       vent.rotation.x = Math.PI / 2;
       const gap = inside(new THREE.Mesh(gapGeometry, stencilled(ventMat, ref)));
       gap.position.set(0, floorY + 0.003, ROOM.toyZ);
       gap.rotation.x = -Math.PI / 2;
+      h.absorbers = [vent, gap];
       h.points = new THREE.Points(new THREE.BufferGeometry(), stencilled(particleMaterial, ref));
       h.points.material.uniforms.uTop.value = (ROOM.half - slotY) / TOY_SCALE;
       h.points.material.uniforms.uBottom.value = (floorY - slotY) / TOY_SCALE;
@@ -394,7 +453,9 @@ const particleMaterial = new THREE.ShaderMaterial({
       p.x += sin(k * 9.0 + aSeed.x * 40.0) * 0.07 * sway;
       p.z += cos(k * 7.0 + aSeed.y * 40.0) * 0.05 * sway;
       vec3 n = normalize(normalMatrix * normal);
-      float light = 0.6 + 0.8 * max(dot(n, normalize(vec3(-0.25, 0.9, 0.45))), 0.0);
+      // Lit by the LED above: bright on top, dark underneath, stronger near the ceiling.
+      float near = 0.55 + 0.75 * clamp(p.y / uTop, 0.0, 1.0);
+      float light = 0.1 + 1.25 * near * max(dot(n, normalize(vec3(0.0, 0.92, 0.38))), 0.0);
       vColor = color * light;
       vAlpha = step(0.0005, e) * (1.0 - smoothstep(0.9, 1.0, k));
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
@@ -407,7 +468,7 @@ const particleMaterial = new THREE.ShaderMaterial({
       vec2 c = gl_PointCoord - 0.5;
       float r = dot(c, c);
       if (r > 0.25 || vAlpha < 0.01) discard;
-      gl_FragColor = vec4(vColor * (1.0 - r * 1.2), vAlpha);
+      gl_FragColor = vec4(vColor * (0.72 - c.y * 0.9) * (1.0 - r * 1.6), vAlpha);   // each grain shaded like a tiny bead
       #include <tonemapping_fragment>
       #include <colorspace_fragment>
     }`,
@@ -474,14 +535,15 @@ let niches = [], grid = { cols: 0, rows: 0 };
 let wallOffset = 0;                 // which artwork sits in the first niche
 let flip = null;                    // running "all cubes turn" transition
 
+/** The lamp behind the LED ring: a downlight in the niche ceiling, straight above the figure. */
 function displayLight(half, shadows) {
-  const light = new THREE.SpotLight(0xfff1dc, 1, half * 2.7, 0.72, 1, 1.2);
-  light.position.set(0, half * 0.74, -half * 0.14);
-  light.target.position.set(0, -half * 0.35, -half * 0.62);
+  const light = new THREE.SpotLight(0xfff6ea, 1, shadows ? 0 : half * 2.45, 0.95, 0.85, 1.2);
+  light.position.set(0, half * 0.8, -half * (1 - ROOM.toyZ) + half * 0.14);
+  light.target.position.set(0, -half * ROOM.half, -half * (1 - ROOM.toyZ));
   if (shadows) {
     light.castShadow = true;
     light.shadow.mapSize.set(1024, 1024);
-    light.shadow.radius = 7;
+    light.shadow.radius = 6;
     light.shadow.bias = -0.0006;
     light.shadow.normalBias = 0.02;
     light.shadow.camera.near = 0.05;
@@ -508,7 +570,7 @@ function buildWall(cols, rows) {
     turnCube(shelf, 'y', 0);
     const lamp = displayLight(CELL, false);
     lamp.position.set(cx, cy, 0);
-    lamp.userData.light.intensity = 1.7;
+    lamp.userData.light.intensity = 1.9;
     wallView.add(shelf.group, lamp);
     niches.push({ cx, cy, col, row, shelf });
   }
@@ -520,23 +582,30 @@ function poseWall(rx, ry) {
   wallView.rotation.set(rx, ry, 0);
   // Skew each interior along its depth: the rim stays glued to the wall while
   // the back swings further than the wall itself, exaggerating the parallax.
-  const sx = -PARALLAX * Math.tan(ry), sy = PARALLAX * Math.tan(rx);
+  const sx = PARALLAX * Math.tan(ry), sy = -PARALLAX * Math.tan(rx);
   for (const n of niches) {
     shear.set(1, 0, sx, n.cx, 0, 1, sy, n.cy, 0, 0, 1, 0, 0, 0, 0, 1);
     n.shelf.group.matrix.copy(shear);
   }
 }
 
-/** Every cube makes a quarter turn in a wave and each niche gets its neighbour's figure. */
-function startFlip(axis, dir) {
-  const step = axis === 'y' ? 1 : grid.cols;
-  flip = { axis, dir, step, time: 0 };
+/**
+ * Every cube makes a half turn in the direction of the push (px, py are -1, 0
+ * or 1, so diagonals work too) and each niche gets its neighbour's figure.
+ * The turn starts in the corner the push comes from and travels across the wall.
+ */
+function startFlip(px, py) {
+  const len = Math.hypot(px, py);
+  const delta = -px + py * grid.cols;
+  flip = { axis: new THREE.Vector3(-py / len, px / len, 0), delta, time: 0 };
+  const along = (n) => (n.cx * px + n.cy * py) / len, across = (n) => (n.cx * py - n.cy * px) / len;
+  const minAlong = Math.min(...niches.map(along)), minAcross = Math.min(...niches.map(across));
   niches.forEach((n, i) => {
-    // The wave starts in one corner, on the side the wall was pushed towards, and spreads diagonally.
-    const fromCol = axis === 'y' && dir > 0 ? grid.cols - 1 : 0;
-    const fromRow = axis === 'x' && dir > 0 ? grid.rows - 1 : 0;
-    n.delay = Math.hypot(n.col - fromCol, n.row - fromRow) * 0.17;
-    setArt(n.shelf.holders[1], mod(i + wallOffset + dir * step, N));
+    n.delay = (along(n) - minAlong) * 0.17 + (across(n) - minAcross) * 0.075;
+    const arriving = n.shelf.holders[1];
+    setArt(arriving, mod(i + wallOffset + delta, N));
+    arriving.group.quaternion.setFromAxisAngle(flip.axis, Math.PI);     // waits on the back face, ready to arrive upright
+    arriving.group.visible = true;
   });
 }
 
@@ -544,19 +613,19 @@ function stepFlip(dt) {
   flip.time += dt;
   let done = true;
   for (const n of niches) {
-    const p = clamp((flip.time - n.delay) / 0.85, 0, 1);
+    const p = clamp((flip.time - n.delay) / 1.15, 0, 1);
     if (p < 1) done = false;
     const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
-    turnCube(n.shelf, flip.axis, flip.dir * e * 0.9999);
+    n.shelf.cube.quaternion.setFromAxisAngle(flip.axis, e * Math.PI);
   }
   if (!done) return;
-  wallOffset = mod(wallOffset + flip.dir * flip.step, N);
+  wallOffset = mod(wallOffset + flip.delta, N);
   niches.forEach((n, i) => {
     // The arriving figure becomes the resting one; the cube snaps back unseen.
     n.shelf.holders.reverse();
     n.shelf.holders[0].group.rotation.set(0, 0, 0);
     n.shelf.holders[0].group.visible = true;
-    turnCube(n.shelf, flip.axis, 0);
+    turnCube(n.shelf, 'y', 0);
     setArt(n.shelf.holders[0], mod(i + wallOffset, N));
   });
   flip = null;
@@ -568,7 +637,7 @@ scene.add(carouselView);
 const hero = makeShelf(R, true);
 hero.sideRef = hero.holders[1].ref;
 const heroLamp = displayLight(R, true);
-heroLamp.userData.light.intensity = 3.6;
+heroLamp.userData.light.intensity = 4.2;
 carouselView.add(hero.group, heroLamp, wallMesh([[0, 0, R]]), backdrop(-R * 2.6));
 
 const car = {
@@ -596,12 +665,13 @@ function dissolve(holder, d, side) {
   const u = holder.points.material.uniforms;
   u.uD.value = d;
   u.uSide.value = side;
-  u.uSize.value = 0.013 * renderer.domElement.height / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  u.uSize.value = 0.011 * renderer.domElement.height / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
 }
 
 function poseCarousel() {
   const [a, b] = hero.holders;
   let current;
+  hero.holders.forEach((h) => h.absorbers.forEach((m) => { m.visible = car.mode === 'particles'; }));
   if (car.mode === 'cube') {
     const n = Math.round(car.t), frac = car.t - n;
     if (b.slot.parent !== b.group) b.group.add(b.slot);
@@ -643,7 +713,7 @@ const btnOption = document.getElementById('option');
 let plateIndex = -1;
 let view = 'wall';
 const tilt = { x: 0, y: 0, tx: 0, ty: 0, hold: false, armed: true };
-const cam = { dist: 10, zoom: 1, zoomT: 1, x: 0, y: 0, halfW: 1, halfH: 1 };
+const cam = { dist: 10, zoom: 1, zoomT: 1, x: 0, y: 0, px: 0, py: 0, halfW: 1, halfH: 1 };
 
 function refreshUI() {
   const wall = view === 'wall';
@@ -714,6 +784,8 @@ new ResizeObserver(fitCamera).observe(canvas);
 function clampPan() {
   const k = 1 - 1 / cam.zoom;
   const mx = (grid.cols * PITCH / 2 + 0.2) * k, my = (grid.rows * PITCH / 2 + 0.2) * k;
+  cam.px = clamp(cam.px, -mx, mx);
+  cam.py = clamp(cam.py, -my, my);
   cam.x = clamp(cam.x, -mx, mx);
   cam.y = clamp(cam.y, -my, my);
 }
@@ -734,8 +806,9 @@ function zoomAt(next, clientX, clientY) {
   next = clamp(next, 1, ZOOM_MAX);
   const rect = canvas.getBoundingClientRect();
   const nx = ((clientX - rect.left) / rect.width) * 2 - 1, ny = -(((clientY - rect.top) / rect.height) * 2 - 1);
-  cam.x += nx * cam.halfW * (1 / cam.zoom - 1 / next);
-  cam.y += ny * cam.halfH * (1 / cam.zoom - 1 / next);
+  cam.px += nx * cam.halfW * (1 / cam.zoom - 1 / next);
+  cam.py += ny * cam.halfH * (1 / cam.zoom - 1 / next);
+  cam.x = cam.px; cam.y = cam.py;
   cam.zoom = cam.zoomT = next;
   btnOption.innerHTML = next > 1.05 ? '<b>Zoom</b> Out' : '<b>Zoom</b> In';
   hint.style.opacity = next > 1.05 ? 0 : 1;
@@ -766,8 +839,8 @@ canvas.addEventListener('pointermove', (e) => {
   const mouse = e.pointerType === 'mouse';
   if (view === 'wall' && mouse) {
     // Mouse: the wall follows the pointer, no press needed.
-    tilt.ty = (e.clientX / w - 0.5) * 2.2 * MAX_TILT;
-    tilt.tx = (e.clientY / h - 0.5) * 2.2 * MAX_TILT * 0.7;
+    tilt.ty = (e.clientX / w - 0.5) * 2.3 * MAX_TILT;
+    tilt.tx = (e.clientY / h - 0.5) * 2.3 * MAX_TILT * 0.7;
   }
   const p = pointers.get(e.pointerId);
   if (!p) return;
@@ -788,12 +861,13 @@ canvas.addEventListener('pointermove', (e) => {
   if (view === 'wall') {
     if (cam.zoom > 1.02) {                      // zoomed in: dragging also moves across the wall
       const perPx = (2 * cam.halfH / cam.zoom) / h;
-      cam.x -= dx * perPx;
-      cam.y += dy * perPx;
+      cam.px -= dx * perPx;
+      cam.py += dy * perPx;
     }
     if (!mouse && !drag.tiltOff) {
-      tilt.ty += (dx / w) * 3.4 * MAX_TILT;
-      tilt.tx += (dy / h) * 2.6 * MAX_TILT;
+      const gain = cam.zoom > 1.05 ? 1.2 : 2.6;
+      tilt.ty += (dx / w) * gain * MAX_TILT;
+      tilt.tx += (dy / w) * gain * MAX_TILT * 0.7;
     }
   } else {
     if (!drag.axisLocked) {
@@ -873,23 +947,25 @@ let last = performance.now();
 function update(dt) {
   if (view === 'wall') {
     const limX = MAX_TILT * 0.7, limY = MAX_TILT;
-    tilt.tx = clamp(tilt.tx, -limX, limX);
-    tilt.ty = clamp(tilt.ty, -limY, limY);
+    const zoomed = cam.zoomT > 1.05;
+    // Keep the push inside an ellipse so diagonals reach the limit as easily as straight pushes.
+    const cap = zoomed ? 0.55 : 1, push = Math.hypot(tilt.ty / limY, tilt.tx / limX);
+    if (push > cap) { tilt.ty *= cap / push; tilt.tx *= cap / push; }
     // After a turn the wall swings back and ignores the push until it has been let go.
-    if (tilt.hold && !flip && Math.abs(tilt.tx) < limX * 0.5 && Math.abs(tilt.ty) < limY * 0.5) tilt.hold = false;
-    const ease = 1 - Math.exp(-dt * 7);
+    if (tilt.hold && !flip && push < 0.5) tilt.hold = false;
+    const ease = 1 - Math.exp(-dt * 4.5);
     tilt.x += ((tilt.hold ? 0 : tilt.tx) - tilt.x) * ease;
     tilt.y += ((tilt.hold ? 0 : tilt.ty) - tilt.y) * ease;
-    if (!flip && !tilt.hold) {
-      let go = null;
-      if (Math.abs(tilt.y) > limY * FLIP_AT) go = ['y', tilt.y > 0 ? -1 : 1];
-      else if (Math.abs(tilt.x) > limX * FLIP_AT) go = ['x', tilt.x > 0 ? -1 : 1];
-      if (go) {
-        startFlip(go[0], go[1]);
-        tilt.hold = true;
-        if (pointers.size) { drag.tiltOff = true; tilt.tx = tilt.ty = 0; }
-      }
+    if (!flip && !tilt.hold && !zoomed && Math.hypot(tilt.y / limY, tilt.x / limX) > FLIP_AT) {
+      // Turn the way the wall is being pushed, snapped to the nearest of eight directions.
+      const a = Math.round(Math.atan2(-tilt.x / limX, tilt.y / limY) / (Math.PI / 4)) * (Math.PI / 4);
+      startFlip(Math.round(Math.cos(a)), Math.round(Math.sin(a)));
+      tilt.hold = true;
+      if (pointers.size) { drag.tiltOff = true; tilt.tx = tilt.ty = 0; }
     }
+    const glide = 1 - Math.exp(-dt * 14);
+    cam.x += (cam.px - cam.x) * glide;
+    cam.y += (cam.py - cam.y) * glide;
     if (flip) stepFlip(dt);
     cam.zoom += (cam.zoomT - cam.zoom) * (1 - Math.exp(-dt * 9));
     poseWall(tilt.x, tilt.y);
