@@ -2,8 +2,8 @@
 
 A minimal clay-white wall with recessed shelves for showing digital art toys, built with three.js. Two views to A/B test:
 
-- **Wall** – a grid of niches cut into one wall. Drag (or move the mouse) to tilt it slightly; the niche interiors move differently from the wall. The Parallax button cycles Deep / Natural / Counter.
-- **Carousel** – one niche with a revolving panel. Swiping turns it; every half-turn brings the next figure round. The Swipe button switches between sideways and up/down.
+- **Wall** – a grid of niches in one white wall, each a small cube with its own display lamp. Drag (or move the mouse) to tilt it; the niche interiors swing further than the wall. Push the tilt to its limit and every cube makes a quarter turn in a wave, moving each figure to the next niche. Pinch, scroll or use the Zoom button to get close to a single figure; drag to move around while zoomed.
+- **Carousel** – one large niche. Swipe sideways or up and down to browse. The Transition button switches between two ways of changing figure: the whole cube turns, or the figure dissolves into particles that rise while the next one gathers from below.
 
 Tapping a figure on the wall opens it in the carousel.
 
@@ -15,4 +15,4 @@ No build step. Serve the folder and open `index.html`:
 
 ## Adding artworks
 
-Figures are placeholders generated in `makeToy()` from the `ARTWORKS` list at the top of `main.js`. Replace `makeToy()` with a model loader to show real designs. Tilt range, parallax strengths and niche sizes are constants just below that list.
+Figures are placeholders generated in `makeToy()` from the `ARTWORKS` list at the top of `main.js`. Replace `makeToy()` with a model loader to show real designs. Tilt range, parallax strength, zoom limits and niche sizes are constants just below that list.

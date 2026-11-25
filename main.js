@@ -19,143 +19,152 @@ const ARTWORKS = [
   { name: 'Sol',   body: '#f0913a', accent: '#fff2c9', ears: 'none' },
 ];
 const N = ARTWORKS.length;
+const mod = (v, m) => ((v % m) + m) % m;
+const clamp = THREE.MathUtils.clamp;
 
 /* Tunables */
-const MAX_TILT = 0.26;                       // wall view: max tilt in radians (~15°)
-const PARALLAX = [                           // wall view: how the niche interiors move vs the wall
-  { label: 'Deep',    k: 1.5 },              // interior swings further than the wall (exaggerated depth)
-  { label: 'Natural', k: 0 },                // plain geometry, no extra movement
-  { label: 'Counter', k: -0.75 },            // interior swings against the wall
-];
-const PITCH = 1.3, OPEN = 1.0, DEPTH = 0.75, CORNER = 0.1;   // wall niche sizes
-const R = 1;                                 // carousel niche half-size
+const MAX_TILT = 0.32;        // wall view: max sideways tilt in radians (~18°); up/down uses 70% of it
+const PARALLAX = 2.0;         // wall view: how much further the niche interiors swing than the wall
+const FLIP_AT = 0.93;         // wall view: fraction of max tilt that makes every cube turn
+const ZOOM_MAX = 2.6, ZOOM_STEP = 2.2;
+const PITCH = 1.3, CELL = 0.5;          // wall niche spacing and half-size
+const R = 1;                            // carousel niche half-size
+const TOY_H = 1.32;                     // tallest placeholder toy, in toy units
+const PARTICLES = 9000;
 
-/* ------------------------------------------------------------------ */
+/* ------------------------------ renderer ------------------------------ */
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMapping = THREE.LinearToneMapping;   // keeps the wall a true white and the figure colours saturated
+renderer.toneMappingExposure = 1.0;
+renderer.localClippingEnabled = true;
 
 const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
 const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
 
-const hemi = new THREE.HemisphereLight(0xffffff, 0xd8d2c8, 2.0);
+/* Studio environment for reflections: a grey room with a few soft boxes. */
+{
+  const studio = new THREE.Scene();
+  const glow = (v) => new THREE.MeshBasicMaterial({ color: new THREE.Color(v, v, v), side: THREE.DoubleSide });
+  const room = new THREE.Mesh(new THREE.BoxGeometry(20, 20, 20), new THREE.MeshBasicMaterial({ color: 0x8c8c8c, side: THREE.BackSide }));
+  const panel = (w, h, v, x, y, z) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), glow(v));
+    m.position.set(x, y, z);
+    m.lookAt(0, 0, 0);
+    studio.add(m);
+  };
+  studio.add(room);
+  panel(10, 10, 5, 0, 9, 0);        // overhead
+  panel(6, 8, 7, -8, 3, 6);         // key soft box, front left
+  panel(4, 6, 2.5, 8, 1, 5);        // fill, front right
+  panel(8, 2, 3, 0, -2, 9);         // low strip in front
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(studio, 0.03).texture;
+  pmrem.dispose();
+}
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0xe9e6e1, 0.75);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffffff, 1.7);
-sun.position.set(-3, 4.5, 11);
+const sun = new THREE.DirectionalLight(0xffffff, 2.1);
+sun.position.set(-3.5, 8, 9);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.radius = 5;
+sun.shadow.radius = 6;
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
 Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 30 });
 scene.add(sun);
 
-const clay = new THREE.MeshStandardMaterial({ color: 0xf1efea, roughness: 0.95, side: THREE.DoubleSide });
+const wallMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55 });
+const cubeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: 0.55, vertexColors: true, side: THREE.DoubleSide });
+const voidMat = new THREE.MeshStandardMaterial({ color: 0x6f6c68, roughness: 1, envMapIntensity: 0.05 });
+const plinthMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, envMapIntensity: 0.6 });
 
-function applyTheme() {
-  const wall = getComputedStyle(document.documentElement).getPropertyValue('--wall').trim() || '#f1efea';
-  clay.color.set(wall);
-  scene.background = new THREE.Color(wall);
-  const dark = clay.color.getHSL({}).l < 0.5;
-  hemi.intensity = dark ? 3.4 : 2.0;
-  hemi.groundColor.set(dark ? 0x77736c : 0xd8d2c8);
-}
-applyTheme();
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
-new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-
-/* ---------------------------- geometry helpers ---------------------------- */
-function roundedRect(target, cx, cy, w, h, r) {
-  const x = cx - w / 2, y = cy - h / 2;
-  target.moveTo(x + r, y);
-  target.lineTo(x + w - r, y);
-  target.absarc(x + w - r, y + r, r, -Math.PI / 2, 0, false);
-  target.lineTo(x + w, y + h - r);
-  target.absarc(x + w - r, y + h - r, r, 0, Math.PI / 2, false);
-  target.lineTo(x + r, y + h);
-  target.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false);
-  target.lineTo(x, y + r);
-  target.absarc(x + r, y + r, r, Math.PI, Math.PI * 1.5, false);
-  return target;
-}
-
-/** Flat wall with holes cut where the niches are. */
-function wallGeometry(holes) {
+/* ---------------------------- geometry ---------------------------- */
+function wallMesh(holes) {
   const shape = new THREE.Shape();
   shape.moveTo(-40, -40); shape.lineTo(40, -40); shape.lineTo(40, 40); shape.lineTo(-40, 40); shape.closePath();
-  shape.holes = holes;
-  return new THREE.ShapeGeometry(shape, 10);
+  shape.holes = holes.map(([cx, cy, half]) => {
+    const p = new THREE.Path();
+    p.moveTo(cx - half, cy - half); p.lineTo(cx + half, cy - half);
+    p.lineTo(cx + half, cy + half); p.lineTo(cx - half, cy + half); p.closePath();
+    return p;
+  });
+  const m = new THREE.Mesh(new THREE.ShapeGeometry(shape), wallMat);
+  m.castShadow = true;        // shades the niches, never sits in shadow itself
+  return m;
 }
 
-/** Surface between two equally long rings/lines of points. */
-function strip(a, b, closed) {
-  const n = a.length, pos = [], idx = [];
-  for (let i = 0; i < n; i++) pos.push(a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z);
-  const count = closed ? n : n - 1;
-  for (let i = 0; i < count; i++) {
-    const j = (i + 1) % n;
-    idx.push(2 * i, 2 * j, 2 * i + 1, 2 * i + 1, 2 * j, 2 * j + 1);
+function backdrop(z) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), voidMat);
+  m.position.z = z;
+  m.receiveShadow = true;
+  return m;
+}
+
+/**
+ * Unit cube (half-size 1) with a tapered alcove sunk into each of its six
+ * faces. Because all faces match, any quarter turn looks the same as rest,
+ * so the cube can keep turning forever while the figures are swapped.
+ */
+const ALC = { rim: 0.92, back: 0.36, depth: 0.55 };
+const cubeGeometry = (() => {
+  const pos = [], col = [];
+  const sq = (h, z) => [[-h, -h, z], [h, -h, z], [h, h, z], [-h, h, z]];
+  const face = [];           // [vertex, shade] triangles for the +z face
+  const quad = (a, b, c, d, sa, sb) => face.push([a, sa], [b, sa], [c, sb], [a, sa], [c, sb], [d, sb]);
+  const outer = sq(1, 1), rim = sq(ALC.rim, 1), back = sq(ALC.back, 1 - ALC.depth);
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    quad(outer[i], outer[j], rim[j], rim[i], 1, 1);
+    quad(rim[i], rim[j], back[j], back[i], 0.74, 0.3);     // darker towards the back: cheap ambient occlusion
+  }
+  quad(back[0], back[1], back[2], back[3], 0.3, 0.3);
+  const turns = [[0, 0], [0, 1], [0, 2], [0, 3], [1, 0], [-1, 0]].map(([x, y]) =>
+    new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(x * Math.PI / 2, y * Math.PI / 2, 0)));
+  const v = new THREE.Vector3();
+  for (const m of turns) for (const [p, s] of face) {
+    v.set(p[0], p[1], p[2]).applyMatrix4(m);
+    pos.push(v.x, v.y, v.z);
+    col.push(s, s, s);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setIndex(idx);
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   g.computeVertexNormals();
   return g;
-}
-
-/** Triangle fan over a convex outline. */
-function fan(pts) {
-  const pos = [], idx = [];
-  pts.forEach((p) => pos.push(p.x, p.y, p.z));
-  for (let i = 1; i < pts.length - 1; i++) idx.push(0, i, i + 1);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  return g;
-}
-
-function clayMesh(geometry) {
-  const m = new THREE.Mesh(geometry, clay);
-  m.receiveShadow = true;
-  m.castShadow = true;
-  return m;
-}
-
-/** The wall face shades the niches but never sits in shadow itself. */
-function wallMesh(holes) {
-  const m = clayMesh(wallGeometry(holes));
-  m.receiveShadow = false;
-  return m;
-}
+})();
+const plinthGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.05, 48);
 
 /* ------------------------------- toys ------------------------------- */
 const G = {
-  sphere: new THREE.SphereGeometry(1, 32, 24),
-  leg: new THREE.CapsuleGeometry(0.085, 0.1, 6, 16),
-  body: new THREE.CapsuleGeometry(0.2, 0.14, 8, 24),
-  arm: new THREE.CapsuleGeometry(0.065, 0.15, 6, 16),
-  longEar: new THREE.CapsuleGeometry(0.06, 0.24, 6, 16),
-  cone: new THREE.ConeGeometry(0.1, 0.2, 24),
+  sphere: new THREE.SphereGeometry(1, 40, 28),
+  leg: new THREE.CapsuleGeometry(0.085, 0.1, 8, 20),
+  body: new THREE.CapsuleGeometry(0.2, 0.14, 10, 28),
+  arm: new THREE.CapsuleGeometry(0.065, 0.15, 8, 20),
+  longEar: new THREE.CapsuleGeometry(0.06, 0.24, 8, 20),
+  cone: new THREE.ConeGeometry(0.1, 0.2, 28),
   rod: new THREE.CylinderGeometry(0.012, 0.012, 0.2, 8),
 };
 const matCache = new Map();
 function vinyl(color) {
   if (!matCache.has(color)) {
-    matCache.set(color, new THREE.MeshPhysicalMaterial({ color, roughness: 0.42, clearcoat: 0.6, clearcoatRoughness: 0.35 }));
+    matCache.set(color, new THREE.MeshPhysicalMaterial({
+      color, roughness: 0.4, clearcoat: 0.8, clearcoatRoughness: 0.2, envMapIntensity: 0.45,
+    }));
   }
   return matCache.get(color);
 }
-const eyeMat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.2 });
+const eyeMat = new THREE.MeshPhysicalMaterial({ color: 0x0c0c0c, roughness: 0.08, clearcoat: 1 });
 
-/** Placeholder art toy, about 1.1 units tall, feet at y = 0, facing +z. */
-function makeToy(art) {
+/** Placeholder art toy, feet at y = 0, facing +z. `skin` can swap each material (used for clipping). */
+function makeToy(art, skin = (m) => m) {
   const toy = new THREE.Group();
-  const main = vinyl(art.body), accent = vinyl(art.accent);
+  const main = skin(vinyl(art.body)), accent = skin(vinyl(art.accent)), eye = skin(eyeMat);
   const add = (geo, mat, x, y, z, s = 1, rz = 0) => {
     const m = new THREE.Mesh(geo, mat);
     m.position.set(x, y, z);
@@ -164,7 +173,6 @@ function makeToy(art) {
     m.castShadow = true;
     m.receiveShadow = true;
     toy.add(m);
-    return m;
   };
   add(G.leg, main, -0.11, 0.135, 0);
   add(G.leg, main, 0.11, 0.135, 0);
@@ -173,8 +181,8 @@ function makeToy(art) {
   add(G.arm, main, -0.26, 0.42, 0, 1, -0.45);
   add(G.arm, main, 0.26, 0.42, 0, 1, 0.45);
   add(G.sphere, main, 0, 0.76, 0, [0.31, 0.28, 0.29]);
-  add(G.sphere, eyeMat, -0.105, 0.77, 0.265, 0.036);
-  add(G.sphere, eyeMat, 0.105, 0.77, 0.265, 0.036);
+  add(G.sphere, eye, -0.105, 0.77, 0.265, 0.036);
+  add(G.sphere, eye, 0.105, 0.77, 0.265, 0.036);
   switch (art.ears) {
     case 'bear':
       add(G.sphere, main, -0.22, 0.98, 0, 0.1); add(G.sphere, main, 0.22, 0.98, 0, 0.1);
@@ -200,124 +208,321 @@ function makeToy(art) {
   return toy;
 }
 
+/* ---------------------- shelf module: cube + two figures ---------------------- */
+/**
+ * One niche: a turning cube plus two figure holders. Holder 0 is the figure
+ * facing out; holder 1 is the one arriving on a side face (or, in particle
+ * mode, the one forming in the same spot). Sizes are relative to `half`.
+ */
+function makeShelf(half, withParticles) {
+  const group = new THREE.Group();          // sits in the wall, never turns
+  const cube = new THREE.Group();           // turns
+  cube.scale.setScalar(half * 0.998);
+  cube.position.z = -half;
+  const shell = new THREE.Mesh(cubeGeometry, cubeMat);
+  shell.castShadow = true;
+  shell.receiveShadow = true;
+  cube.add(shell);
+  group.add(cube);
+
+  const holders = [0, 1].map(() => {
+    const g = new THREE.Group();
+    const plinth = new THREE.Mesh(plinthGeometry, plinthMat);
+    plinth.position.set(0, -0.645, 0.7);
+    plinth.castShadow = true;
+    plinth.receiveShadow = true;
+    const slot = new THREE.Group();
+    slot.position.set(0, -0.62, 0.7);
+    slot.scale.setScalar(0.95);
+    g.add(plinth, slot);
+    cube.add(g);
+    const h = { group: g, slot, art: -1, toy: null };
+    if (withParticles) {
+      h.plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6);
+      h.skins = new Map();
+      h.skin = (m) => {
+        if (!h.skins.has(m)) {
+          const c = m.clone();
+          c.clippingPlanes = [h.plane];
+          c.clipShadows = true;
+          h.skins.set(m, c);
+        }
+        return h.skins.get(m);
+      };
+      h.points = new THREE.Points(new THREE.BufferGeometry(), particleMaterial.clone());
+      h.points.frustumCulled = false;
+      h.points.visible = false;
+      slot.add(h.points);
+    }
+    return h;
+  });
+  return { group, cube, holders, half };
+}
+
+function setArt(holder, index) {
+  if (holder.art === index) return;
+  holder.art = index;
+  if (holder.toy) holder.slot.remove(holder.toy);
+  holder.toy = makeToy(ARTWORKS[index], holder.skin);
+  holder.slot.add(holder.toy);
+  if (holder.points) holder.points.geometry = particleGeometry(index);
+}
+
+/** Pose a cube `frac` quarter-turns (-0.5..0.5) towards the next figure along `axis`. */
+function turnCube(shelf, axis, frac) {
+  shelf.cube.rotation.set(0, 0, 0);
+  shelf.cube.rotation[axis] = -frac * Math.PI / 2;
+  const side = shelf.holders[1].group;
+  side.rotation.set(0, 0, 0);
+  side.rotation[axis] = (frac >= 0 ? 1 : -1) * Math.PI / 2;
+  side.visible = Math.abs(frac) > 0.0005;
+}
+
+/* ------------------------------ particles ------------------------------ */
+const particleMaterial = new THREE.ShaderMaterial({
+  uniforms: { uD: { value: 0 }, uDir: { value: 1 }, uSize: { value: 30 } },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: /* glsl */`
+    attribute vec3 color; attribute vec3 aSeed; attribute float aH;
+    uniform float uD, uDir, uSize;
+    varying vec3 vColor; varying float vAlpha;
+    void main() {
+      // The figure comes apart from the top down: each grain leaves when the sweep reaches its height.
+      float start = (1.0 - aH) * 0.5;
+      float e = clamp((uD - start) / 0.5, 0.0, 1.0);
+      float k = e * e * (3.0 - 2.0 * e);
+      float ang = aSeed.x * 6.2832 + k * 6.0 * (aSeed.y - 0.5);
+      vec3 p = position;
+      p.x += sin(ang) * 0.3 * k * aSeed.z;
+      p.z += (cos(ang) * 0.12 - 0.3) * k * aSeed.z;   // drift back, so the dust stays inside the niche
+      p.y += uDir * k * (0.7 + aSeed.y * 1.1);
+      vec3 n = normalize(normalMatrix * normal);
+      float light = 0.5 + 0.75 * max(dot(n, normalize(vec3(-0.25, 0.9, 0.45))), 0.0);
+      vColor = color * light;
+      vAlpha = step(0.0005, e) * (1.0 - smoothstep(0.7, 1.0, e));
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uSize * (1.0 - 0.55 * k) / -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    varying vec3 vColor; varying float vAlpha;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      if (dot(c, c) > 0.25 || vAlpha < 0.01) discard;
+      gl_FragColor = vec4(vColor, vAlpha);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`,
+});
+
+const particleCache = new Map();
+/** Points scattered evenly over a figure's surface, coloured like it. */
+function particleGeometry(index) {
+  if (particleCache.has(index)) return particleCache.get(index);
+  const toy = makeToy(ARTWORKS[index]);
+  const tris = [];
+  let total = 0;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  toy.children.forEach((mesh) => {
+    mesh.updateMatrix();
+    const nm = new THREE.Matrix3().getNormalMatrix(mesh.matrix);
+    const p = mesh.geometry.attributes.position, nrm = mesh.geometry.attributes.normal, idx = mesh.geometry.index;
+    const count = idx ? idx.count : p.count;
+    for (let i = 0; i < count; i += 3) {
+      const ia = idx ? idx.getX(i) : i, ib = idx ? idx.getX(i + 1) : i + 1, ic = idx ? idx.getX(i + 2) : i + 2;
+      a.fromBufferAttribute(p, ia).applyMatrix4(mesh.matrix);
+      b.fromBufferAttribute(p, ib).applyMatrix4(mesh.matrix);
+      c.fromBufferAttribute(p, ic).applyMatrix4(mesh.matrix);
+      const area = b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
+      if (area < 1e-9) continue;
+      total += area;
+      tris.push({ a: a.clone(), b: b.clone(), c: c.clone(), n: new THREE.Vector3().fromBufferAttribute(nrm, ia).applyMatrix3(nm).normalize(), color: mesh.material.color, sum: total });
+    }
+  });
+  const pos = new Float32Array(PARTICLES * 3), col = new Float32Array(PARTICLES * 3), nor = new Float32Array(PARTICLES * 3);
+  const seed = new Float32Array(PARTICLES * 3), hs = new Float32Array(PARTICLES);
+  const rgb = new THREE.Color();
+  for (let i = 0; i < PARTICLES; i++) {
+    const pick = Math.random() * total;
+    let lo = 0, hi = tris.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (tris[mid].sum < pick) lo = mid + 1; else hi = mid; }
+    const t = tris[lo];
+    let u = Math.random(), v = Math.random();
+    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+    const x = t.a.x + (t.b.x - t.a.x) * u + (t.c.x - t.a.x) * v;
+    const y = t.a.y + (t.b.y - t.a.y) * u + (t.c.y - t.a.y) * v;
+    const z = t.a.z + (t.b.z - t.a.z) * u + (t.c.z - t.a.z) * v;
+    pos.set([x, y, z], i * 3);
+    nor.set([t.n.x, t.n.y, t.n.z], i * 3);
+    rgb.copy(t.color);
+    col.set([rgb.r, rgb.g, rgb.b], i * 3);
+    seed.set([Math.random(), Math.random(), Math.random()], i * 3);
+    hs[i] = clamp(y / TOY_H, 0, 1);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 3));
+  g.setAttribute('aH', new THREE.BufferAttribute(hs, 1));
+  particleCache.set(index, g);
+  return g;
+}
+
 /* ------------------------------ wall view ------------------------------ */
 const wallView = new THREE.Group();
 scene.add(wallView);
 let niches = [], grid = { cols: 0, rows: 0 };
+let wallOffset = 0;                 // which artwork sits in the first niche
+let flip = null;                    // running "all cubes turn" transition
+
+function displayLight(half, shadows) {
+  const light = new THREE.SpotLight(0xfff1dc, 1, half * 2.5, 0.5, 0.9, 1.2);
+  light.position.set(0, half * 0.95, -half * 0.1);
+  light.target.position.set(0, -half * 0.25, -half * 0.42);
+  if (shadows) {
+    light.castShadow = true;
+    light.shadow.mapSize.set(1024, 1024);
+    light.shadow.radius = 4;
+    light.shadow.bias = -0.0006;
+    light.shadow.normalBias = 0.02;
+    light.shadow.camera.near = 0.05;
+  }
+  const g = new THREE.Group();
+  g.add(light, light.target);
+  g.userData.light = light;
+  return g;
+}
 
 function buildWall(cols, rows) {
   wallView.clear();
   niches = [];
   grid = { cols, rows };
+  flip = null;
   const holes = [];
-  const count = cols * rows;
-  for (let i = 0; i < count; i++) {
-    const cx = ((i % cols) - (cols - 1) / 2) * PITCH;
-    const cy = ((rows - 1) / 2 - Math.floor(i / cols)) * PITCH;
-    holes.push(roundedRect(new THREE.Path(), cx, cy, OPEN, OPEN, CORNER));
-
-    // Interior shell, modelled around its own origin so it can be skewed by depth.
-    const ring = roundedRect(new THREE.Path(), 0, 0, OPEN, OPEN, CORNER).getPoints(8);
-    const front = ring.map((p) => new THREE.Vector3(p.x, p.y, 0));
-    const back = ring.map((p) => new THREE.Vector3(p.x, p.y, -DEPTH));
-    const shell = new THREE.Group();
-    shell.add(clayMesh(strip(front, back, true)), clayMesh(fan(back)));
-    shell.matrixAutoUpdate = false;
-
-    const toy = makeToy(ARTWORKS[i % N]);
-    toy.scale.setScalar(0.62);
-    wallView.add(shell, toy);
-    niches.push({ cx, cy, shell, toy });
+  for (let i = 0; i < cols * rows; i++) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const cx = (col - (cols - 1) / 2) * PITCH, cy = ((rows - 1) / 2 - row) * PITCH;
+    holes.push([cx, cy, CELL]);
+    const shelf = makeShelf(CELL, false);
+    shelf.group.matrixAutoUpdate = false;
+    setArt(shelf.holders[0], mod(i + wallOffset, N));
+    turnCube(shelf, 'y', 0);
+    const lamp = displayLight(CELL, false);
+    lamp.position.set(cx, cy, 0);
+    lamp.userData.light.intensity = 3.4;
+    wallView.add(shelf.group, lamp);
+    niches.push({ cx, cy, col, row, shelf });
   }
-  wallView.add(wallMesh(holes));
+  wallView.add(wallMesh(holes), backdrop(-CELL * 2.6));
 }
 
 const shear = new THREE.Matrix4();
-function poseWall(rx, ry, k) {
+function poseWall(rx, ry) {
   wallView.rotation.set(rx, ry, 0);
-  // Skew each interior along its depth: the rim stays glued to the wall,
-  // the back swings by k times the tilt. That is the "rotates differently" effect.
-  const sx = -k * Math.tan(ry), sy = k * Math.tan(rx);
-  const toyZ = -DEPTH * 0.55;
+  // Skew each interior along its depth: the rim stays glued to the wall while
+  // the back swings further than the wall itself, exaggerating the parallax.
+  const sx = -PARALLAX * Math.tan(ry), sy = PARALLAX * Math.tan(rx);
   for (const n of niches) {
     shear.set(1, 0, sx, n.cx, 0, 1, sy, n.cy, 0, 0, 1, 0, 0, 0, 0, 1);
-    n.shell.matrix.copy(shear);
-    n.toy.position.set(n.cx + sx * toyZ, n.cy - OPEN / 2 + sy * toyZ, toyZ);
-    n.toy.rotation.set(-rx * k * 0.5, -ry * k * 0.5, 0);
+    n.shelf.group.matrix.copy(shear);
   }
+}
+
+/** Every cube makes a quarter turn in a wave and each niche gets its neighbour's figure. */
+function startFlip(axis, dir) {
+  const step = axis === 'y' ? 1 : grid.cols;
+  flip = { axis, dir, step, time: 0 };
+  niches.forEach((n, i) => {
+    const along = axis === 'y' ? n.col : n.row, across = axis === 'y' ? n.row : n.col;
+    const span = (axis === 'y' ? grid.cols : grid.rows) - 1;
+    n.delay = (dir > 0 ? span - along : along) * 0.09 + across * 0.035;
+    setArt(n.shelf.holders[1], mod(i + wallOffset + dir * step, N));
+  });
+}
+
+function stepFlip(dt) {
+  flip.time += dt;
+  let done = true;
+  for (const n of niches) {
+    const p = clamp((flip.time - n.delay) / 0.8, 0, 1);
+    if (p < 1) done = false;
+    const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+    turnCube(n.shelf, flip.axis, flip.dir * e * 0.9999);
+  }
+  if (!done) return;
+  wallOffset = mod(wallOffset + flip.dir * flip.step, N);
+  niches.forEach((n, i) => {
+    // The arriving figure becomes the resting one; the cube snaps back unseen.
+    n.shelf.holders.reverse();
+    n.shelf.holders[0].group.rotation.set(0, 0, 0);
+    n.shelf.holders[0].group.visible = true;
+    turnCube(n.shelf, flip.axis, 0);
+    setArt(n.shelf.holders[0], mod(i + wallOffset, N));
+  });
+  flip = null;
 }
 
 /* ---------------------------- carousel view ---------------------------- */
 const carouselView = new THREE.Group();
 scene.add(carouselView);
-const cavity = new THREE.Group();     // fixed alcove: straight sides, half-round back
-const rotor = new THREE.Group();      // revolving panel with one toy on each face
-rotor.position.z = -R;
-carouselView.add(cavity, rotor);
-carouselView.add(wallMesh([roundedRect(new THREE.Path(), 0, 0, 2 * R, 2 * R, 0.08)]));
+const hero = makeShelf(R, true);
+const heroLamp = displayLight(R, true);
+heroLamp.userData.light.intensity = 7.5;
+carouselView.add(hero.group, heroLamp, wallMesh([[0, 0, R]]), backdrop(-R * 2.6));
 
-{
-  const profile = [[-R, 0]];
-  for (let i = 0; i <= 40; i++) {
-    const a = Math.PI + (i / 40) * Math.PI;
-    profile.push([R * Math.cos(a), -R + R * Math.sin(a)]);
-  }
-  profile.push([R, 0]);
-  const top = profile.map(([x, z]) => new THREE.Vector3(x, R, z));
-  const bottom = profile.map(([x, z]) => new THREE.Vector3(x, -R, z));
-  cavity.add(clayMesh(strip(top, bottom, false)), clayMesh(fan(top)), clayMesh(fan(bottom)));
+const car = {
+  mode: 'cube',        // 'cube' or 'particles'
+  cur: 0,              // artwork at rest
+  axis: 'y',           // 'y' = sideways swipe, 'x' = up/down swipe
+  t: 0, target: 0,     // progress in steps along the current axis
+  velocity: 0,
+};
+const carStep = () => (car.axis === 'y' ? 1 : (grid.cols || 3));
+const carArt = (k) => mod(car.cur + k * carStep(), N);
+
+function settleCarousel() {
+  const n = Math.round(car.t);
+  car.cur = carArt(n);
+  car.t -= n;
+  car.target -= n;
 }
 
-const faces = [new THREE.Group(), new THREE.Group()];
-let axis = 'y';            // 'y' = swipe sideways, 'x' = swipe up/down
-let angle = 0, target = 0, velocity = 0;
-const shown = [null, null];
-
-function buildRotor() {
-  rotor.clear();
-  rotor.rotation.set(0, 0, 0);
-  cavity.rotation.z = axis === 'y' ? 0 : Math.PI / 2;
-  rotor.add(clayMesh(new THREE.BoxGeometry(2 * R - 0.03, 2 * R - 0.03, 0.05)));
-  if (axis === 'y') {
-    const disc = clayMesh(new THREE.CylinderGeometry(R - 0.02, R - 0.02, 0.03, 64));
-    disc.position.y = -R + 0.02;
-    rotor.add(disc);
-  }
-  faces.forEach((face, i) => {
-    face.clear();
-    face.rotation.set(0, 0, 0);
-    face.rotation[axis] = i * Math.PI;
-    if (axis === 'x') {
-      const ledge = clayMesh(new THREE.BoxGeometry(1.15, 0.05, 0.6));
-      ledge.position.set(0, -0.625, 0.325);
-      face.add(ledge);
-    }
-    rotor.add(face);
-    shown[i] = null;
-  });
+function dissolve(holder, d, dir) {
+  // d: 0 = solid figure, 1 = fully turned to dust. A cut plane sweeps down the solid as the grains leave.
+  const worldScale = R * 0.998 * 0.95;
+  const baseY = holder.slot.getWorldPosition(new THREE.Vector3()).y;
+  holder.plane.constant = d <= 0 ? 1e6 : baseY + (1 - 2 * d) * TOY_H * worldScale;
+  holder.points.visible = d > 0 && d < 1;
+  holder.points.material.uniforms.uD.value = d;
+  holder.points.material.uniforms.uDir.value = dir;
+  holder.points.material.uniforms.uSize.value = 0.016 * renderer.domElement.height / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
 }
-
-const mod = (v, m) => ((v % m) + m) % m;
 
 function poseCarousel() {
-  rotor.rotation[axis] = angle;
-  const t = angle / Math.PI;
-  // Each face carries the artwork for the nearest half-turn at which it faces
-  // the viewer; it is swapped while it is turned away.
-  const want = [2 * Math.round(t / 2), 2 * Math.round((t - 1) / 2) + 1];
-  faces.forEach((face, i) => {
-    const art = mod(-want[i], N);
-    if (shown[i] === art) return;
-    shown[i] = art;
-    const old = face.getObjectByName('toy');
-    if (old) face.remove(old);
-    const toy = makeToy(ARTWORKS[art]);
-    toy.name = 'toy';
-    if (axis === 'y') { toy.scale.setScalar(1.15); toy.position.set(0, -R + 0.035, 0.42); }
-    else { toy.scale.setScalar(0.95); toy.position.set(0, -0.6, 0.33); }
-    face.add(toy);
-  });
-  const current = mod(-Math.round(t), N);
+  const [a, b] = hero.holders;
+  let current;
+  if (car.mode === 'cube') {
+    const n = Math.round(car.t), frac = car.t - n;
+    setArt(a, carArt(n));
+    setArt(b, carArt(n + (frac >= 0 ? 1 : -1)));
+    turnCube(hero, car.axis, frac);
+    dissolve(a, 0, 1); dissolve(b, 0, 1);
+    current = carArt(n);
+  } else {
+    const f = Math.floor(car.t + 1e-6), u = clamp(car.t - f, 0, 1);
+    setArt(a, carArt(f));
+    setArt(b, carArt(f + 1));
+    turnCube(hero, car.axis, 0);
+    b.group.rotation.set(0, 0, 0);
+    b.group.visible = u > 0;
+    b.group.children[0].visible = false;           // one plinth is enough when both stand in the same spot
+    dissolve(a, u, 1);                             // leaving figure rises as dust
+    dissolve(b, 1 - u, -1);                        // next figure gathers from below
+    current = carArt(Math.round(car.t));
+  }
+  if (car.mode === 'cube') b.group.children[0].visible = true;
   if (current !== plateIndex) {
     plateIndex = current;
     plateName.textContent = ARTWORKS[current].name;
@@ -335,8 +540,8 @@ const btnCarousel = document.getElementById('view-carousel');
 const btnOption = document.getElementById('option');
 let plateIndex = -1;
 let view = 'wall';
-let parallaxMode = 0;
-const tilt = { x: 0, y: 0, tx: 0, ty: 0 };
+const tilt = { x: 0, y: 0, tx: 0, ty: 0, hold: false, armed: true };
+const cam = { dist: 10, zoom: 1, zoomT: 1, x: 0, y: 0, halfW: 1, halfH: 1 };
 
 function refreshUI() {
   const wall = view === 'wall';
@@ -346,11 +551,11 @@ function refreshUI() {
   btnWall.setAttribute('aria-pressed', String(wall));
   btnCarousel.setAttribute('aria-pressed', String(!wall));
   if (wall) {
-    hint.textContent = 'Drag to tilt the wall. Tap a figure to open it.';
-    btnOption.innerHTML = `<b>Parallax</b> ${PARALLAX[parallaxMode].label}`;
+    hint.textContent = 'Drag to tilt; push to the edge to turn every shelf. Pinch or scroll to zoom. Tap a figure to open it.';
+    btnOption.innerHTML = cam.zoomT > 1.05 ? '<b>Zoom</b> Out' : '<b>Zoom</b> In';
   } else {
-    hint.textContent = axis === 'y' ? 'Swipe sideways to turn the shelf.' : 'Swipe up or down to turn the shelf.';
-    btnOption.innerHTML = `<b>Swipe</b> ${axis === 'y' ? 'Sideways' : 'Up / down'}`;
+    hint.textContent = 'Swipe sideways or up and down to browse.';
+    btnOption.innerHTML = `<b>Transition</b> ${car.mode === 'cube' ? 'Cube' : 'Particles'}`;
   }
   fitCamera();
 }
@@ -360,7 +565,7 @@ function setView(next, artIndex) {
   canvas.classList.add('fade');
   setTimeout(() => {
     view = next;
-    if (artIndex !== undefined) { angle = target = -artIndex * Math.PI; velocity = 0; }
+    if (artIndex !== undefined) { car.cur = artIndex; car.t = car.target = 0; }
     tilt.x = tilt.y = tilt.tx = tilt.ty = 0;
     refreshUI();
     canvas.classList.remove('fade');
@@ -371,12 +576,11 @@ btnWall.addEventListener('click', () => setView('wall'));
 btnCarousel.addEventListener('click', () => setView('carousel'));
 btnOption.addEventListener('click', () => {
   if (view === 'wall') {
-    parallaxMode = (parallaxMode + 1) % PARALLAX.length;
+    cam.zoomT = cam.zoomT > 1.05 ? 1 : ZOOM_STEP;
   } else {
-    const current = mod(-Math.round(angle / Math.PI), N);
-    axis = axis === 'y' ? 'x' : 'y';
-    buildRotor();
-    angle = target = -current * Math.PI;
+    settleCarousel();
+    car.t = car.target = 0;
+    car.mode = car.mode === 'cube' ? 'particles' : 'cube';
   }
   refreshUI();
 });
@@ -387,82 +591,141 @@ function fitCamera() {
   if (!w || !h) return;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
-  let cw, ch, cy = 0;
+  let cw, ch;
   if (view === 'wall') {
     const cols = camera.aspect > 1.15 ? 4 : 3, rows = 12 / cols;
     if (cols !== grid.cols) buildWall(cols, rows);
     cw = cols * PITCH + 0.5; ch = rows * PITCH + 2.2;
   } else {
-    cw = 3.3; ch = 5.2; cy = -0.25;
+    cw = 3.3; ch = 5.2;
   }
   const tan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-  const dist = Math.max(ch / 2 / tan, cw / 2 / (tan * camera.aspect));
-  camera.position.set(0, cy, dist);
-  camera.lookAt(0, cy, 0);
+  cam.dist = Math.max(ch / 2 / tan, cw / 2 / (tan * camera.aspect));
+  cam.halfH = cam.dist * tan;
+  cam.halfW = cam.halfH * camera.aspect;
   camera.updateProjectionMatrix();
 }
 new ResizeObserver(fitCamera).observe(canvas);
 
+function clampPan() {
+  const k = 1 - 1 / cam.zoom;
+  const mx = (grid.cols * PITCH / 2 + 0.2) * k, my = (grid.rows * PITCH / 2 + 0.2) * k;
+  cam.x = clamp(cam.x, -mx, mx);
+  cam.y = clamp(cam.y, -my, my);
+}
+
+function placeCamera() {
+  if (view === 'wall') {
+    clampPan();
+    camera.position.set(cam.x, cam.y, cam.dist / cam.zoom);
+    camera.lookAt(cam.x, cam.y, 0);
+  } else {
+    camera.position.set(0, -0.25, cam.dist);
+    camera.lookAt(0, -0.25, 0);
+  }
+}
+
+/** Zoom the wall while keeping the point under (clientX, clientY) in place. */
+function zoomAt(next, clientX, clientY) {
+  next = clamp(next, 1, ZOOM_MAX);
+  const rect = canvas.getBoundingClientRect();
+  const nx = ((clientX - rect.left) / rect.width) * 2 - 1, ny = -(((clientY - rect.top) / rect.height) * 2 - 1);
+  cam.x += nx * cam.halfW * (1 / cam.zoom - 1 / next);
+  cam.y += ny * cam.halfH * (1 / cam.zoom - 1 / next);
+  cam.zoom = cam.zoomT = next;
+  btnOption.innerHTML = next > 1.05 ? '<b>Zoom</b> Out' : '<b>Zoom</b> In';
+}
+
 /* ------------------------------ pointer ------------------------------ */
-const drag = { id: null, x: 0, y: 0, startX: 0, startY: 0, time: 0, moved: 0 };
+const pointers = new Map();
+const drag = { moved: 0, time: 0, axisLocked: false, pinch: 0, pinchZoom: 1, tiltOff: false };
 const raycaster = new THREE.Raycaster();
 
 canvas.addEventListener('pointerdown', (e) => {
-  drag.id = e.pointerId;
-  drag.x = drag.startX = e.clientX;
-  drag.y = drag.startY = e.clientY;
-  drag.time = performance.now();
-  drag.moved = 0;
-  velocity = 0;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   canvas.setPointerCapture(e.pointerId);
   canvas.classList.add('dragging');
+  if (pointers.size === 1) {
+    Object.assign(drag, { moved: 0, time: performance.now(), axisLocked: false, tiltOff: false });
+    car.velocity = 0;
+  } else if (pointers.size === 2) {
+    const [p, q] = [...pointers.values()];
+    drag.pinch = Math.hypot(p.x - q.x, p.y - q.y);
+    drag.pinchZoom = cam.zoom;
+    drag.moved = 99;
+  }
 });
 
 canvas.addEventListener('pointermove', (e) => {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (view === 'wall' && e.pointerType === 'mouse') {
+  const mouse = e.pointerType === 'mouse';
+  if (view === 'wall' && mouse) {
     // Mouse: the wall follows the pointer, no press needed.
-    tilt.ty = (e.clientX / w - 0.5) * 2 * MAX_TILT;
-    tilt.tx = (e.clientY / h - 0.5) * 2 * MAX_TILT * 0.7;
+    tilt.ty = (e.clientX / w - 0.5) * 2.2 * MAX_TILT;
+    tilt.tx = (e.clientY / h - 0.5) * 2.2 * MAX_TILT * 0.7;
   }
-  if (drag.id !== e.pointerId) return;
-  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+
+  if (pointers.size === 2 && view === 'wall') {
+    const [a, b] = [...pointers.values()];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomAt(drag.pinchZoom * dist / drag.pinch, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    return;
+  }
+  if (pointers.size !== 1) return;
   const now = performance.now(), dt = Math.max(now - drag.time, 1);
-  drag.x = e.clientX; drag.y = e.clientY; drag.time = now;
+  drag.time = now;
   drag.moved += Math.abs(dx) + Math.abs(dy);
+
   if (view === 'wall') {
-    if (e.pointerType !== 'mouse') {
-      tilt.ty = THREE.MathUtils.clamp(tilt.ty + (dx / w) * 1.6 * MAX_TILT * 2, -MAX_TILT, MAX_TILT);
-      tilt.tx = THREE.MathUtils.clamp(tilt.tx + (dy / h) * 1.2 * MAX_TILT * 2, -MAX_TILT * 0.7, MAX_TILT * 0.7);
+    if (cam.zoom > 1.02) {                      // zoomed in: dragging also moves across the wall
+      const perPx = (2 * cam.halfH / cam.zoom) / h;
+      cam.x -= dx * perPx;
+      cam.y += dy * perPx;
+    }
+    if (!mouse && !drag.tiltOff) {
+      tilt.ty += (dx / w) * 3.4 * MAX_TILT;
+      tilt.tx += (dy / h) * 2.6 * MAX_TILT;
     }
   } else {
-    // One half-turn (one artwork) per ~60% of the short screen side.
-    const perPx = Math.PI / (Math.min(w, h) * 0.6);
-    const d = (axis === 'y' ? dx : dy) * perPx;
-    angle += d;
-    target = angle;
-    velocity = 0.7 * velocity + 0.3 * (d / dt) * 1000;
+    if (!drag.axisLocked) {
+      if (drag.moved < 6) return;
+      if (Math.abs(car.t - Math.round(car.t)) < 0.03) {      // at rest: this swipe may pick a new direction
+        settleCarousel();
+        car.t = car.target = 0;
+        car.axis = Math.abs(dx) >= Math.abs(dy) ? 'y' : 'x';
+      }
+      drag.axisLocked = true;
+    }
+    // One figure per ~55% of the short screen side. Left and up go forward.
+    const d = -(car.axis === 'y' ? dx : dy) / (Math.min(w, h) * 0.55);
+    car.t += d;
+    car.target = car.t;
+    car.velocity = 0.7 * car.velocity + 0.3 * (d / dt) * 1000;
   }
 });
 
 function release(e) {
-  if (drag.id !== e.pointerId) return;
-  drag.id = null;
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  if (pointers.size) return;
   canvas.classList.remove('dragging');
   if (view === 'wall') {
     if (e.pointerType !== 'mouse') tilt.tx = tilt.ty = 0;   // settle back to front-on
     if (drag.moved < 8 && e.type === 'pointerup') openAt(e.clientX, e.clientY);
   } else {
-    // Throw: settle on the half-turn the swipe is heading for, at most one step past the nearest.
-    const near = Math.round(angle / Math.PI);
-    const thrown = Math.round((angle + velocity * 0.22) / Math.PI);
-    target = THREE.MathUtils.clamp(thrown, near - 1, near + 1) * Math.PI;
-    velocity = 0;
+    // Throw: settle on the figure the swipe is heading for, at most one past the nearest.
+    const near = Math.round(car.t);
+    car.target = clamp(Math.round(car.t + car.velocity * 0.2), near - 1, near + 1);
+    car.velocity = 0;
   }
 }
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
-canvas.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && drag.id === null) tilt.tx = tilt.ty = 0; });
+canvas.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && !pointers.size) tilt.tx = tilt.ty = 0; });
 
 function openAt(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
@@ -473,46 +736,74 @@ function openAt(clientX, clientY) {
   const o = raycaster.ray.origin.clone().applyMatrix4(inv);
   const d = raycaster.ray.direction.clone().transformDirection(inv);
   const p = o.addScaledVector(d, -o.z / d.z);
-  const i = niches.findIndex((n) => Math.abs(p.x - n.cx) < OPEN / 2 && Math.abs(p.y - n.cy) < OPEN / 2);
-  if (i >= 0) setView('carousel', i % N);
+  const i = niches.findIndex((n) => Math.abs(p.x - n.cx) < CELL && Math.abs(p.y - n.cy) < CELL);
+  if (i >= 0) setView('carousel', mod(i + wallOffset, N));
 }
 
 canvas.addEventListener('wheel', (e) => {
-  if (view !== 'carousel') return;
   e.preventDefault();
-  if (Math.abs(target - angle) > 0.4) return;
-  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-  if (Math.abs(delta) > 4) target = (Math.round(angle / Math.PI) - Math.sign(delta)) * Math.PI;
+  if (view === 'wall') { zoomAt(cam.zoom * Math.exp(-e.deltaY * 0.0018), e.clientX, e.clientY); return; }
+  if (Math.abs(car.target - car.t) > 0.15) return;
+  const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+  const delta = sideways ? e.deltaX : e.deltaY;
+  if (Math.abs(delta) < 4) return;
+  settleCarousel();
+  car.axis = sideways ? 'y' : 'x';
+  car.target = Math.round(car.t) + Math.sign(delta);
 }, { passive: false });
 
 window.addEventListener('keydown', (e) => {
   if (view !== 'carousel') return;
-  const step = { ArrowRight: -1, ArrowDown: -1, ArrowLeft: 1, ArrowUp: 1 }[e.key];
-  if (step) { target = (Math.round(target / Math.PI) + step) * Math.PI; e.preventDefault(); }
+  const move = { ArrowRight: ['y', 1], ArrowLeft: ['y', -1], ArrowDown: ['x', -1], ArrowUp: ['x', 1] }[e.key];
+  if (!move || Math.abs(car.target - car.t) > 0.15) return;
+  settleCarousel();
+  car.axis = move[0];
+  car.target = Math.round(car.t) + move[1];
+  e.preventDefault();
 });
 
 /* -------------------------------- loop -------------------------------- */
-buildRotor();
 refreshUI();
 let last = performance.now();
-let kNow = PARALLAX[0].k;
-function frame(now) {
-  const dt = Math.min((now - last) / 1000, 0.05);
-  last = now;
+function update(dt) {
   if (view === 'wall') {
+    const limX = MAX_TILT * 0.7, limY = MAX_TILT;
+    tilt.tx = clamp(tilt.tx, -limX, limX);
+    tilt.ty = clamp(tilt.ty, -limY, limY);
+    // After a turn the wall swings back and ignores the push until it has been let go.
+    if (tilt.hold && !flip && Math.abs(tilt.tx) < limX * 0.5 && Math.abs(tilt.ty) < limY * 0.5) tilt.hold = false;
     const ease = 1 - Math.exp(-dt * 7);
-    tilt.x += (tilt.tx - tilt.x) * ease;
-    tilt.y += (tilt.ty - tilt.y) * ease;
-    kNow += (PARALLAX[parallaxMode].k - kNow) * ease;
-    poseWall(tilt.x, tilt.y, kNow);
+    tilt.x += ((tilt.hold ? 0 : tilt.tx) - tilt.x) * ease;
+    tilt.y += ((tilt.hold ? 0 : tilt.ty) - tilt.y) * ease;
+    if (!flip && !tilt.hold) {
+      let go = null;
+      if (Math.abs(tilt.y) > limY * FLIP_AT) go = ['y', tilt.y > 0 ? -1 : 1];
+      else if (Math.abs(tilt.x) > limX * FLIP_AT) go = ['x', tilt.x > 0 ? -1 : 1];
+      if (go) {
+        startFlip(go[0], go[1]);
+        tilt.hold = true;
+        if (pointers.size) { drag.tiltOff = true; tilt.tx = tilt.ty = 0; }
+      }
+    }
+    if (flip) stepFlip(dt);
+    cam.zoom += (cam.zoomT - cam.zoom) * (1 - Math.exp(-dt * 9));
+    poseWall(tilt.x, tilt.y);
   } else {
-    if (drag.id === null) angle += (target - angle) * (1 - Math.exp(-dt * 9));
+    if (!pointers.size) {
+      car.t += (car.target - car.t) * (1 - Math.exp(-dt * 8));
+      if (Math.abs(car.target - car.t) < 0.0015) car.t = car.target;
+    }
     poseCarousel();
   }
+  placeCamera();
+}
+function frame(now) {
+  update(Math.min((now - last) / 1000, 0.05));
+  last = now;
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
 // Small hook for testing from the console.
-window.figureDisplay = { setView, tilt, get angle() { return angle; }, set angle(v) { angle = target = v; } };
+window.figureDisplay = { setView, tilt, cam, car, advance(seconds) { for (let t = 0; t < seconds; t += 0.02) update(0.02); } };

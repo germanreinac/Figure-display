@@ -1,28 +1,15 @@
 /* Layout: one full-bleed clay wall (canvas); type and controls float on it, quiet and small. */
 :root {
-  --wall: #f1efea;        /* clay wall, read by main.js for the 3D material */
+  --wall: #ffffff;        /* single white look by design: the scene is a lit white wall */
   --ink: #23221f;
   --ink-soft: #8b8881;
-  --chip: rgba(255, 255, 255, 0.72);
+  --chip: rgba(255, 255, 255, 0.78);
   --chip-line: rgba(35, 34, 31, 0.1);
   --chip-on: #23221f;
   --chip-on-ink: #f6f4ef;
   --font-display: "Unbounded", "Avenir Next", "Segoe UI", system-ui, sans-serif;
   --font-ui: "DM Sans", "Helvetica Neue", system-ui, sans-serif;
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --wall: #3a3936; --ink: #f1efea; --ink-soft: #a09d96;
-    --chip: rgba(30, 29, 27, 0.7); --chip-line: rgba(241, 239, 234, 0.14);
-    --chip-on: #f1efea; --chip-on-ink: #23221f; color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --wall: #3a3936; --ink: #f1efea; --ink-soft: #a09d96;
-  --chip: rgba(30, 29, 27, 0.7); --chip-line: rgba(241, 239, 234, 0.14);
-  --chip-on: #f1efea; --chip-on-ink: #23221f; color-scheme: dark;
-}
-
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -63,7 +50,7 @@ h1 {
   font-family: var(--font-display);
   font-size: 0.8rem; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
 }
-#hint { margin: 0; font-size: 0.8rem; color: var(--ink-soft); }
+#hint { margin: 0; max-width: 34ch; font-size: 0.8rem; line-height: 1.35; color: var(--ink-soft); }
 
 #plate { text-align: center; min-height: 3.2rem; }
 #plate-name {
