@@ -2,8 +2,8 @@
 
 A minimal clay-white wall with recessed shelves for showing digital art toys, built with three.js. Two views to A/B test:
 
-- **Wall** – a grid of niches in one limewashed white wall. Each niche is a soft-cornered room on the face of a turning cube, lit by an LED ring in its ceiling. Drag (or move the mouse) to tilt the wall; the niche interiors swing further than the wall. Push the tilt to its limit and every cube makes a half turn in the direction of the push (eight directions, diagonals included), in a wave that travels across the wall, and each figure moves to a neighbouring niche. Pinch, scroll or use the Zoom button to get close to a single figure; drag to move around while zoomed.
-- **Carousel** – one large niche. Swipe sideways or up and down to browse. The Transition button switches between two ways of changing figure: the whole cube turns, or the figure dissolves into particles that leave through a vent inside the LED ring, then the next one gathers from a gap around the plinth.
+- **Wall** – a grid of niches in one limewashed white wall. Each niche is a soft-cornered room on the face of a turning cube, lit by an LED ring in its ceiling. Drag (or move the mouse) to tilt the wall; the niche interiors swing further than the wall. Push the tilt to its limit and every cube turns in the direction of the push while the wall stays tilted: a quarter turn for a straight push, two in a row for a diagonal, in a wave that travels across the wall. Each figure moves to a neighbouring niche, and holding the push keeps them turning. Pinch, scroll or use the Zoom button to get close to a single figure; drag to move around while zoomed.
+- **Carousel** – one large niche. Swipe sideways or up and down to browse. The Transition button switches between two ways of changing figure: the whole cube turns, or the figure dissolves into particles that leave through a vent inside the LED ring, and once it is half gone the next one starts gathering from a gap around the plinth.
 
 Tapping a figure on the wall opens it in the carousel.
 

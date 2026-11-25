@@ -68,10 +68,10 @@ const camera = new THREE.PerspectiveCamera(26, 1, 1, 100);
   pmrem.dispose();
 }
 
-const hemi = new THREE.HemisphereLight(0xffffff, 0xdcd8d2, 0.3);
+const hemi = new THREE.HemisphereLight(0xffffff, 0xdcd8d2, 0.22);
 scene.add(hemi);
 // Raking daylight from above: bright on the wall face, mostly blocked inside the niches.
-const sun = new THREE.DirectionalLight(0xffffff, 3.05);
+const sun = new THREE.DirectionalLight(0xffffff, 1.85);
 sun.position.set(-4.5, 8.5, 7);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -122,7 +122,7 @@ const plaster = { color: 0xffffff, roughness: 1, bumpMap: limewash, bumpScale: 1
 const wallMat = new THREE.MeshStandardMaterial({ ...plaster, envMapIntensity: 0.3 });
 const frameMat = wallMat;
 const roomMat = new THREE.MeshStandardMaterial({ ...plaster, bumpScale: 0.5, envMapIntensity: 0.16, vertexColors: true, side: THREE.DoubleSide });
-const voidMat = new THREE.MeshStandardMaterial({ color: 0xcfcbc4, roughness: 1, envMapIntensity: 0.2 });
+const voidMat = new THREE.MeshStandardMaterial({ ...plaster, color: 0xe9e9e9, envMapIntensity: 0.3 });   // reads as more wall, not as a hole
 const plinthMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, envMapIntensity: 0.4 });
 const ventMat = new THREE.MeshBasicMaterial({ color: 0x2b2a28 });
 const ledMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
@@ -321,7 +321,7 @@ function stencilled(material, ref) {
   return m;
 }
 
-function makeShelf(half, withParticles) {
+function makeShelf(half, withParticles, count = 2) {
   const group = new THREE.Group();          // sits in the wall, never turns
   const cube = new THREE.Group();           // turns
   cube.scale.setScalar(half * 1.0015);       // a hair larger than the opening and just behind it, so no seam shows
@@ -332,7 +332,7 @@ function makeShelf(half, withParticles) {
   group.add(cube);
 
   const floorY = -ROOM.half, slotY = floorY + 0.05;
-  const holders = [0, 1].map(() => {
+  const holders = Array.from({ length: count }, () => {
     const ref = (nextStencil++ % 250) + 1;
     const g = new THREE.Group();
     const inside = (mesh) => { mesh.renderOrder = 2; g.add(mesh); return mesh; };
@@ -564,13 +564,14 @@ function buildWall(cols, rows) {
     const col = i % cols, row = Math.floor(i / cols);
     const cx = (col - (cols - 1) / 2) * PITCH, cy = ((rows - 1) / 2 - row) * PITCH;
     holes.push([cx, cy, CELL]);
-    const shelf = makeShelf(CELL, false);
+    const shelf = makeShelf(CELL, false, 3);       // front, plus up to two faces that come round in a turn
+    shelf.holders[2].group.visible = false;
     shelf.group.matrixAutoUpdate = false;
     setArt(shelf.holders[0], mod(i + wallOffset, N));
     turnCube(shelf, 'y', 0);
     const lamp = displayLight(CELL, false);
     lamp.position.set(cx, cy, 0);
-    lamp.userData.light.intensity = 1.9;
+    lamp.userData.light.intensity = 2.5;
     wallView.add(shelf.group, lamp);
     niches.push({ cx, cy, col, row, shelf });
   }
@@ -584,51 +585,72 @@ function poseWall(rx, ry) {
   // the back swings further than the wall itself, exaggerating the parallax.
   const sx = PARALLAX * Math.tan(ry), sy = -PARALLAX * Math.tan(rx);
   for (const n of niches) {
-    shear.set(1, 0, sx, n.cx, 0, 1, sy, n.cy, 0, 0, 1, 0, 0, 0, 0, 1);
+    const k = 1 - (n.relax || 0);        // a cube lets go of the skew while it turns, so it stays a true cube
+    shear.set(1, 0, sx * k, n.cx, 0, 1, sy * k, n.cy, 0, 0, 1, 0, 0, 0, 0, 1);
     n.shelf.group.matrix.copy(shear);
   }
 }
 
 /**
- * Every cube makes a half turn in the direction of the push (px, py are -1, 0
- * or 1, so diagonals work too) and each niche gets its neighbour's figure.
- * The turn starts in the corner the push comes from and travels across the wall.
+ * Every cube turns the way the wall is pushed (px, py are -1, 0 or 1) and each
+ * niche gets its neighbour's figure. A straight push is one quarter turn; a
+ * diagonal push is two in a row, sideways then up or down, so every face that
+ * comes past is a real niche with a figure in it. The turn starts where the
+ * push comes from and travels across the wall.
  */
+const Y_AXIS = new THREE.Vector3(0, 1, 0), X_AXIS = new THREE.Vector3(1, 0, 0), QUARTER = Math.PI / 2;
 function startFlip(px, py) {
+  const steps = [];
+  if (px) steps.push({ axis: Y_AXIS, sign: px, shift: -px });
+  if (py) steps.push({ axis: X_AXIS, sign: -py, shift: py * grid.cols });
+  flip = { steps, delta: steps.reduce((sum, st) => sum + st.shift, 0), time: 0 };
   const len = Math.hypot(px, py);
-  const delta = -px + py * grid.cols;
-  flip = { axis: new THREE.Vector3(-py / len, px / len, 0), delta, time: 0 };
   const along = (n) => (n.cx * px + n.cy * py) / len, across = (n) => (n.cx * py - n.cy * px) / len;
   const minAlong = Math.min(...niches.map(along)), minAcross = Math.min(...niches.map(across));
   niches.forEach((n, i) => {
     n.delay = (along(n) - minAlong) * 0.17 + (across(n) - minAcross) * 0.075;
-    const arriving = n.shelf.holders[1];
-    setArt(arriving, mod(i + wallOffset + delta, N));
-    arriving.group.quaternion.setFromAxisAngle(flip.axis, Math.PI);     // waits on the back face, ready to arrive upright
-    arriving.group.visible = true;
+    const turned = new THREE.Quaternion();
+    let shift = 0;
+    steps.forEach((st, j) => {
+      // Each arriving figure waits on the face that will be at the front after its step, set to land upright.
+      turned.premultiply(new THREE.Quaternion().setFromAxisAngle(st.axis, st.sign * QUARTER));
+      shift += st.shift;
+      const arriving = n.shelf.holders[j + 1];
+      setArt(arriving, mod(i + wallOffset + shift, N));
+      arriving.group.quaternion.copy(turned).invert();
+      arriving.group.visible = true;
+    });
   });
 }
 
+const stepTurn = new THREE.Quaternion();
 function stepFlip(dt) {
   flip.time += dt;
+  const count = flip.steps.length;
   let done = true;
   for (const n of niches) {
-    const p = clamp((flip.time - n.delay) / 1.15, 0, 1);
+    const p = clamp((flip.time - n.delay) / (0.95 * count), 0, 1);
     if (p < 1) done = false;
-    const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
-    n.shelf.cube.quaternion.setFromAxisAngle(flip.axis, e * Math.PI);
+    const e = p * p * p * (p * (p * 6 - 15) + 10) * count;
+    n.shelf.cube.quaternion.identity();
+    flip.steps.forEach((st, j) => {
+      n.shelf.cube.quaternion.premultiply(stepTurn.setFromAxisAngle(st.axis, st.sign * QUARTER * clamp(e - j, 0, 1)));
+    });
+    n.relax = Math.sin(Math.PI * p);
   }
   if (!done) return;
   wallOffset = mod(wallOffset + flip.delta, N);
   niches.forEach((n, i) => {
-    // The arriving figure becomes the resting one; the cube snaps back unseen.
-    n.shelf.holders.reverse();
-    n.shelf.holders[0].group.rotation.set(0, 0, 0);
-    n.shelf.holders[0].group.visible = true;
-    turnCube(n.shelf, 'y', 0);
-    setArt(n.shelf.holders[0], mod(i + wallOffset, N));
+    // The last figure to arrive becomes the resting one; the cube snaps back unseen.
+    const h = n.shelf.holders;
+    [h[0], h[count]] = [h[count], h[0]];
+    h.forEach((holder, j) => { holder.group.quaternion.identity(); holder.group.visible = j === 0; });
+    n.shelf.cube.quaternion.identity();
+    n.relax = 0;
+    setArt(h[0], mod(i + wallOffset, N));
   });
   flip = null;
+  tilt.rest = 0.55;
 }
 
 /* ---------------------------- carousel view ---------------------------- */
@@ -637,7 +659,7 @@ scene.add(carouselView);
 const hero = makeShelf(R, true);
 hero.sideRef = hero.holders[1].ref;
 const heroLamp = displayLight(R, true);
-heroLamp.userData.light.intensity = 4.2;
+heroLamp.userData.light.intensity = 5;
 carouselView.add(hero.group, heroLamp, wallMesh([[0, 0, R]]), backdrop(-R * 2.6));
 
 const car = {
@@ -682,8 +704,8 @@ function poseCarousel() {
     dissolve(a, 0, 1); dissolve(b, 0, 1);
     current = carArt(n);
   } else {
-    // Both figures share the front room: the first leaves through the ceiling,
-    // then, after a beat, the next gathers from the gap in the floor.
+    // Both figures share the front room: the first leaves through the ceiling
+    // and, once it is half gone, the next starts gathering from the gap in the floor.
     const f = Math.floor(car.t + 1e-6), u = clamp(car.t - f, 0, 1);
     if (b.slot.parent !== a.group) a.group.add(b.slot);
     showThrough(b, a.ref);
@@ -691,8 +713,8 @@ function poseCarousel() {
     setArt(b, carArt(f + 1));
     turnCube(hero, car.axis, 0);
     b.group.visible = false;
-    dissolve(a, clamp(u / 0.5, 0, 1), 1);
-    dissolve(b, 1 - clamp((u - 0.58) / 0.42, 0, 1), -1);
+    dissolve(a, clamp(u / 0.62, 0, 1), 1);
+    dissolve(b, 1 - clamp((u - 0.31) / 0.69, 0, 1), -1);    // the next figure starts forming once the first is half gone
     current = carArt(Math.round(car.t));
   }
   if (current !== plateIndex) {
@@ -864,8 +886,8 @@ canvas.addEventListener('pointermove', (e) => {
       cam.px -= dx * perPx;
       cam.py += dy * perPx;
     }
-    if (!mouse && !drag.tiltOff) {
-      const gain = cam.zoom > 1.05 ? 1.2 : 2.6;
+    if (!mouse) {
+      const gain = cam.zoom > 1.05 ? 1.7 : 2.6;
       tilt.ty += (dx / w) * gain * MAX_TILT;
       tilt.tx += (dy / w) * gain * MAX_TILT * 0.7;
     }
@@ -947,21 +969,17 @@ let last = performance.now();
 function update(dt) {
   if (view === 'wall') {
     const limX = MAX_TILT * 0.7, limY = MAX_TILT;
-    const zoomed = cam.zoomT > 1.05;
     // Keep the push inside an ellipse so diagonals reach the limit as easily as straight pushes.
-    const cap = zoomed ? 0.55 : 1, push = Math.hypot(tilt.ty / limY, tilt.tx / limX);
-    if (push > cap) { tilt.ty *= cap / push; tilt.tx *= cap / push; }
-    // After a turn the wall swings back and ignores the push until it has been let go.
-    if (tilt.hold && !flip && push < 0.5) tilt.hold = false;
+    const push = Math.hypot(tilt.ty / limY, tilt.tx / limX);
+    if (push > 1) { tilt.ty /= push; tilt.tx /= push; }
     const ease = 1 - Math.exp(-dt * 4.5);
-    tilt.x += ((tilt.hold ? 0 : tilt.tx) - tilt.x) * ease;
-    tilt.y += ((tilt.hold ? 0 : tilt.ty) - tilt.y) * ease;
-    if (!flip && !tilt.hold && !zoomed && Math.hypot(tilt.y / limY, tilt.x / limX) > FLIP_AT) {
-      // Turn the way the wall is being pushed, snapped to the nearest of eight directions.
+    tilt.x += (tilt.tx - tilt.x) * ease;
+    tilt.y += (tilt.ty - tilt.y) * ease;
+    // At the limit the cubes turn while the wall stays tilted; holding it there turns them again after a beat.
+    if (!flip) tilt.rest = Math.max(0, (tilt.rest || 0) - dt);
+    if (!flip && !tilt.rest && Math.hypot(tilt.y / limY, tilt.x / limX) > FLIP_AT) {
       const a = Math.round(Math.atan2(-tilt.x / limX, tilt.y / limY) / (Math.PI / 4)) * (Math.PI / 4);
       startFlip(Math.round(Math.cos(a)), Math.round(Math.sin(a)));
-      tilt.hold = true;
-      if (pointers.size) { drag.tiltOff = true; tilt.tx = tilt.ty = 0; }
     }
     const glide = 1 - Math.exp(-dt * 14);
     cam.x += (cam.px - cam.x) * glide;
